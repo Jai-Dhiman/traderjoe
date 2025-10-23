@@ -61,6 +61,13 @@ pub struct PaperTrade {
     pub max_favorable_excursion: Option<f64>,
     pub max_adverse_excursion: Option<f64>,
     pub exit_reason: Option<ExitReason>,
+
+    // Slippage tracking (Migration 007)
+    pub estimated_slippage_pct: Option<f64>,
+    pub actual_entry_slippage_pct: Option<f64>,
+    pub actual_exit_slippage_pct: Option<f64>,
+    pub market_vix: Option<f64>,
+    pub option_moneyness: Option<String>,
 }
 
 pub struct PaperTradingEngine {
@@ -87,9 +94,53 @@ impl PaperTradingEngine {
         commission: f64,
         notes: Option<serde_json::Value>,
     ) -> Result<PaperTrade> {
+        self.enter_trade_with_tracking(
+            context_id,
+            symbol,
+            trade_type,
+            entry_price,
+            shares,
+            position_size_usd,
+            strike_price,
+            expiration_date,
+            slippage_pct,
+            commission,
+            notes,
+            None, // estimated_slippage
+            None, // market_vix
+            None, // option_moneyness
+        )
+        .await
+    }
+
+    /// Enter a new paper trade with slippage tracking
+    pub async fn enter_trade_with_tracking(
+        &self,
+        context_id: Option<Uuid>,
+        symbol: String,
+        trade_type: TradeType,
+        entry_price: f64,
+        shares: f64,
+        position_size_usd: f64,
+        strike_price: Option<f64>,
+        expiration_date: Option<NaiveDate>,
+        slippage_pct: f64,
+        commission: f64,
+        notes: Option<serde_json::Value>,
+        estimated_slippage_pct: Option<f64>,
+        market_vix: Option<f64>,
+        option_moneyness: Option<String>,
+    ) -> Result<PaperTrade> {
         let id = Uuid::new_v4();
         let entry_time = Utc::now();
         let status = TradeStatus::Open;
+
+        // Apply slippage to entry price (slippage worsens the entry)
+        let adjusted_entry_price = match trade_type {
+            TradeType::Call => entry_price * (1.0 + slippage_pct),
+            TradeType::Put => entry_price * (1.0 + slippage_pct),
+            TradeType::Flat => entry_price,
+        };
 
         let trade = sqlx::query_as!(
             PaperTrade,
@@ -97,9 +148,10 @@ impl PaperTradingEngine {
             INSERT INTO paper_trades (
                 id, context_id, symbol, trade_type, entry_price, entry_time,
                 shares, status, position_size_usd, strike_price, expiration_date,
-                slippage_pct, commission, notes, created_at
+                slippage_pct, commission, notes, created_at,
+                estimated_slippage_pct, market_vix, option_moneyness
             )
-            VALUES ($1, $2, $3, $4::text, $5, $6, $7, $8::text, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4::text, $5, $6, $7, $8::text, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             RETURNING
                 id,
                 context_id,
@@ -122,13 +174,18 @@ impl PaperTradingEngine {
                 slippage_pct as "slippage_pct!",
                 max_favorable_excursion,
                 max_adverse_excursion,
-                exit_reason as "exit_reason?: ExitReason"
+                exit_reason as "exit_reason?: ExitReason",
+                estimated_slippage_pct,
+                actual_entry_slippage_pct,
+                actual_exit_slippage_pct,
+                market_vix,
+                option_moneyness
             "#,
             id,
             context_id,
             symbol,
             trade_type.to_string(),
-            entry_price,
+            adjusted_entry_price,
             entry_time,
             shares,
             status.to_string(),
@@ -138,7 +195,10 @@ impl PaperTradingEngine {
             slippage_pct,
             commission,
             notes,
-            entry_time
+            entry_time,
+            estimated_slippage_pct,
+            market_vix,
+            option_moneyness.as_deref()
         )
         .fetch_one(&self.pool)
         .await
@@ -159,8 +219,20 @@ impl PaperTradingEngine {
         // First get the trade to calculate P&L
         let trade = self.get_trade(trade_id).await?;
 
-        // Calculate P&L
-        let gross_pnl = (exit_price - trade.entry_price) * trade.shares;
+        // Apply slippage to exit price (slippage worsens the exit)
+        let adjusted_exit_price = match trade.trade_type {
+            TradeType::Call => exit_price * (1.0 - trade.slippage_pct),
+            TradeType::Put => exit_price * (1.0 - trade.slippage_pct),
+            TradeType::Flat => exit_price,
+        };
+
+        // Calculate P&L based on trade direction
+        let price_diff = match trade.trade_type {
+            TradeType::Call => adjusted_exit_price - trade.entry_price,
+            TradeType::Put => trade.entry_price - adjusted_exit_price,
+            TradeType::Flat => 0.0,
+        };
+        let gross_pnl = price_diff * trade.shares;
         let net_pnl = gross_pnl - (trade.commission * 2.0); // Entry + exit commission
         let pnl_pct = net_pnl / trade.position_size_usd;
 
@@ -199,9 +271,14 @@ impl PaperTradingEngine {
                 slippage_pct as "slippage_pct!",
                 max_favorable_excursion,
                 max_adverse_excursion,
-                exit_reason as "exit_reason?: ExitReason"
+                exit_reason as "exit_reason?: ExitReason",
+                estimated_slippage_pct,
+                actual_entry_slippage_pct,
+                actual_exit_slippage_pct,
+                market_vix,
+                option_moneyness
             "#,
-            exit_price,
+            adjusted_exit_price,
             exit_time,
             TradeStatus::Closed.to_string(),
             net_pnl,
@@ -243,7 +320,12 @@ impl PaperTradingEngine {
                 slippage_pct as "slippage_pct!",
                 max_favorable_excursion,
                 max_adverse_excursion,
-                exit_reason as "exit_reason?: ExitReason"
+                exit_reason as "exit_reason?: ExitReason",
+                estimated_slippage_pct,
+                actual_entry_slippage_pct,
+                actual_exit_slippage_pct,
+                market_vix,
+                option_moneyness
             FROM paper_trades
             WHERE id = $1
             "#,
@@ -283,7 +365,12 @@ impl PaperTradingEngine {
                 slippage_pct as "slippage_pct!",
                 max_favorable_excursion,
                 max_adverse_excursion,
-                exit_reason as "exit_reason?: ExitReason"
+                exit_reason as "exit_reason?: ExitReason",
+                estimated_slippage_pct,
+                actual_entry_slippage_pct,
+                actual_exit_slippage_pct,
+                market_vix,
+                option_moneyness
             FROM paper_trades
             WHERE status = 'OPEN'
             ORDER BY entry_time DESC
@@ -325,7 +412,12 @@ impl PaperTradingEngine {
                 slippage_pct as "slippage_pct!",
                 max_favorable_excursion,
                 max_adverse_excursion,
-                exit_reason as "exit_reason?: ExitReason"
+                exit_reason as "exit_reason?: ExitReason",
+                estimated_slippage_pct,
+                actual_entry_slippage_pct,
+                actual_exit_slippage_pct,
+                market_vix,
+                option_moneyness
             FROM paper_trades
             ORDER BY entry_time DESC
             LIMIT $1
@@ -347,7 +439,14 @@ impl PaperTradingEngine {
     ) -> Result<()> {
         let trade = self.get_trade(trade_id).await?;
 
-        let current_pnl = (current_price - trade.entry_price) * trade.shares - (trade.commission * 2.0);
+        // Calculate P&L based on trade direction
+        let price_diff = match trade.trade_type {
+            TradeType::Call => current_price - trade.entry_price,
+            TradeType::Put => trade.entry_price - current_price,
+            TradeType::Flat => 0.0,
+        };
+        // Only entry commission paid so far (exit commission not yet incurred)
+        let current_pnl = price_diff * trade.shares - trade.commission;
 
         let mfe = trade.max_favorable_excursion.unwrap_or(0.0).max(current_pnl);
         let mae = trade.max_adverse_excursion.unwrap_or(0.0).min(current_pnl);
@@ -373,6 +472,13 @@ impl PaperTradingEngine {
 
     /// Cancel a trade (e.g., if something goes wrong)
     pub async fn cancel_trade(&self, trade_id: Uuid) -> Result<PaperTrade> {
+        // Validate trade status before canceling
+        let trade = self.get_trade(trade_id).await?;
+
+        if trade.status != TradeStatus::Open {
+            anyhow::bail!("Cannot cancel trade with status {:?}", trade.status);
+        }
+
         let updated_trade = sqlx::query_as!(
             PaperTrade,
             r#"
@@ -401,7 +507,12 @@ impl PaperTradingEngine {
                 slippage_pct as "slippage_pct!",
                 max_favorable_excursion,
                 max_adverse_excursion,
-                exit_reason as "exit_reason?: ExitReason"
+                exit_reason as "exit_reason?: ExitReason",
+                estimated_slippage_pct,
+                actual_entry_slippage_pct,
+                actual_exit_slippage_pct,
+                market_vix,
+                option_moneyness
             "#,
             TradeStatus::Cancelled.to_string(),
             trade_id
@@ -412,6 +523,151 @@ impl PaperTradingEngine {
 
         Ok(updated_trade)
     }
+
+    /// Analyze slippage performance for closed trades
+    pub async fn analyze_slippage(&self, days: Option<i32>) -> Result<SlippageAnalysis> {
+        let days = days.unwrap_or(30);
+
+        #[derive(Debug)]
+        struct SlippageRow {
+            vix_range: String,
+            moneyness: String,
+            total_trades: i64,
+            avg_estimated: f64,
+            avg_actual: f64,
+        }
+
+        let rows = sqlx::query_as!(
+            SlippageRow,
+            r#"
+            SELECT
+                CASE
+                    WHEN market_vix < 15 THEN 'VIX_LOW'
+                    WHEN market_vix < 25 THEN 'VIX_NORMAL'
+                    WHEN market_vix < 35 THEN 'VIX_ELEVATED'
+                    ELSE 'VIX_HIGH'
+                END as "vix_range!",
+                COALESCE(option_moneyness, 'ATM') as "moneyness!",
+                COUNT(*) as "total_trades!",
+                AVG(estimated_slippage_pct) as "avg_estimated!",
+                AVG(COALESCE(actual_entry_slippage_pct, estimated_slippage_pct)) as "avg_actual!"
+            FROM paper_trades
+            WHERE
+                status = 'CLOSED'
+                AND entry_time > NOW() - INTERVAL '1 day' * $1
+                AND estimated_slippage_pct IS NOT NULL
+            GROUP BY vix_range, moneyness
+            ORDER BY vix_range, moneyness
+            "#,
+            days
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to analyze slippage")?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let error = row.avg_actual - row.avg_estimated;
+            let error_pct = if row.avg_estimated != 0.0 {
+                (error / row.avg_estimated) * 100.0
+            } else {
+                0.0
+            };
+
+            results.push(SlippageResult {
+                vix_range: row.vix_range,
+                moneyness: row.moneyness,
+                total_trades: row.total_trades,
+                avg_estimated_slippage: row.avg_estimated,
+                avg_actual_slippage: row.avg_actual,
+                slippage_error: error,
+                slippage_error_pct: error_pct,
+            });
+        }
+
+        Ok(SlippageAnalysis { results })
+    }
+
+    /// Calibrate slippage model and save recommendations
+    pub async fn calibrate_slippage(&self) -> Result<Vec<SlippageCalibration>> {
+        let analysis = self.analyze_slippage(Some(30)).await?;
+
+        let mut calibrations = Vec::new();
+        let calibration_date = chrono::Utc::now().date_naive();
+
+        for result in analysis.results {
+            // Only calibrate if we have enough data
+            if result.total_trades < 5 {
+                continue;
+            }
+
+            // Calculate recommended slippage (blend of current estimate and actual)
+            // Use 70% actual, 30% estimated to avoid overreacting
+            let recommended = (result.avg_actual_slippage * 0.7)
+                            + (result.avg_estimated_slippage * 0.3);
+
+            let calibration_id = Uuid::new_v4();
+
+            sqlx::query!(
+                r#"
+                INSERT INTO slippage_calibration (
+                    id, calibration_date, vix_range, moneyness,
+                    total_trades, avg_estimated_slippage, avg_actual_slippage,
+                    slippage_error, slippage_error_pct, recommended_slippage
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                "#,
+                calibration_id,
+                calibration_date,
+                result.vix_range,
+                result.moneyness,
+                result.total_trades,
+                result.avg_estimated_slippage,
+                result.avg_actual_slippage,
+                result.slippage_error,
+                result.slippage_error_pct,
+                recommended
+            )
+            .execute(&self.pool)
+            .await
+            .context("Failed to save calibration")?;
+
+            calibrations.push(SlippageCalibration {
+                vix_range: result.vix_range,
+                moneyness: result.moneyness,
+                recommended_slippage: recommended,
+                total_trades: result.total_trades,
+                slippage_error_pct: result.slippage_error_pct,
+            });
+        }
+
+        Ok(calibrations)
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SlippageAnalysis {
+    pub results: Vec<SlippageResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SlippageResult {
+    pub vix_range: String,
+    pub moneyness: String,
+    pub total_trades: i64,
+    pub avg_estimated_slippage: f64,
+    pub avg_actual_slippage: f64,
+    pub slippage_error: f64,
+    pub slippage_error_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SlippageCalibration {
+    pub vix_range: String,
+    pub moneyness: String,
+    pub recommended_slippage: f64,
+    pub total_trades: i64,
+    pub slippage_error_pct: f64,
 }
 
 impl std::fmt::Display for TradeType {

@@ -41,6 +41,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trigger_playbook_bullets_updated_at ON playbook_bullets;
 CREATE TRIGGER trigger_playbook_bullets_updated_at
     BEFORE UPDATE ON playbook_bullets
     FOR EACH ROW

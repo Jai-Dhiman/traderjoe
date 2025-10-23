@@ -41,9 +41,10 @@ pub fn sanitize_text(input: &str, max_length: usize) -> String {
     // Replace excessive special characters
     sanitized = EXCESSIVE_SPECIAL_CHARS.replace_all(&sanitized, "[chars]").to_string();
 
-    // Truncate to max length
+    // Truncate to max length (accounting for "..." suffix)
     if sanitized.len() > max_length {
-        sanitized.truncate(max_length);
+        let target_len = max_length.saturating_sub(3);
+        sanitized.truncate(target_len);
         // Try to truncate at word boundary
         if let Some(pos) = sanitized.rfind(char::is_whitespace) {
             sanitized.truncate(pos);
@@ -239,7 +240,7 @@ mod tests {
     fn test_truncate_long_headline() {
         let long_headline = "A".repeat(300);
         let sanitized = sanitize_headline(&long_headline);
-        assert!(sanitized.len() <= 203); // 200 + "..."
+        assert!(sanitized.len() <= 200); // Max length enforced
         assert!(sanitized.ends_with("..."));
     }
 

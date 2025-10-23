@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, NaiveTime, Utc};
+use chrono_tz::America::New_York;
 use sqlx::PgPool;
 use tracing::{info, warn};
 
@@ -136,11 +137,10 @@ impl AutoExitManager {
 
     /// Check if current time is past the auto-exit time
     ///
-    /// NOTE: Simplified timezone handling - assumes ET offset
+    /// Properly handles DST transitions using chrono-tz
     fn is_past_exit_time(&self, now: DateTime<Utc>) -> bool {
-        // Convert UTC to ET (simplified - doesn't handle DST)
-        let et_offset = -5; // EST is UTC-5 (use -4 for EDT)
-        let et_time = now + chrono::Duration::hours(et_offset);
+        // Convert UTC to Eastern Time (handles DST automatically)
+        let et_time = now.with_timezone(&New_York);
         let current_time = et_time.time();
 
         current_time >= self.config.auto_exit_time

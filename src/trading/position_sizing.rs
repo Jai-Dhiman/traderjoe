@@ -27,12 +27,23 @@ impl Default for PositionSizer {
 }
 
 impl PositionSizer {
-    pub fn new(max_position_size_pct: f64, kelly_fraction: f64, min_confidence: f64) -> Self {
-        Self {
+    pub fn new(max_position_size_pct: f64, kelly_fraction: f64, min_confidence: f64) -> Result<Self> {
+        // Validate parameters
+        if max_position_size_pct <= 0.0 || max_position_size_pct > 1.0 {
+            bail!("max_position_size_pct must be between 0 and 1, got {}", max_position_size_pct);
+        }
+        if kelly_fraction <= 0.0 || kelly_fraction > 1.0 {
+            bail!("kelly_fraction must be between 0 and 1, got {}", kelly_fraction);
+        }
+        if min_confidence < 0.0 || min_confidence > 1.0 {
+            bail!("min_confidence must be between 0 and 1, got {}", min_confidence);
+        }
+
+        Ok(Self {
             max_position_size_pct,
             kelly_fraction,
             min_confidence,
-        }
+        })
     }
 
     /// Calculate position size using Kelly Criterion
@@ -159,11 +170,21 @@ impl PositionSizer {
 }
 
 /// Calculate optimal Kelly position size (utility function)
+///
+/// Returns 0.0 if inputs are invalid (avg_win is 0 or negative, etc.)
 pub fn kelly_criterion(
     win_rate: f64,
     avg_win: f64,
     avg_loss: f64,
 ) -> f64 {
+    // Validate inputs to prevent division by zero or invalid calculations
+    if avg_win <= 0.0 || avg_loss <= 0.0 {
+        return 0.0;
+    }
+    if win_rate < 0.0 || win_rate > 1.0 {
+        return 0.0;
+    }
+
     let p = win_rate;
     let w = avg_win;
     let l = avg_loss;
@@ -215,6 +236,24 @@ mod tests {
         // Expected: 10000 * 0.36 * 0.25 * 0.75 = 675
         // But capped at 5% = $500
         assert!((position - 500.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_position_sizer_validation() {
+        // Invalid max_position_size_pct
+        assert!(PositionSizer::new(1.5, 0.25, 0.5).is_err());
+        assert!(PositionSizer::new(-0.1, 0.25, 0.5).is_err());
+
+        // Invalid kelly_fraction
+        assert!(PositionSizer::new(0.05, 1.5, 0.5).is_err());
+        assert!(PositionSizer::new(0.05, -0.1, 0.5).is_err());
+
+        // Invalid min_confidence
+        assert!(PositionSizer::new(0.05, 0.25, 1.5).is_err());
+        assert!(PositionSizer::new(0.05, 0.25, -0.1).is_err());
+
+        // Valid parameters
+        assert!(PositionSizer::new(0.05, 0.25, 0.5).is_ok());
     }
 
     #[test]

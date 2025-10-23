@@ -241,36 +241,111 @@ impl ACEEngine {
     }
 
     fn parse_recommendation(&self, llm_response: String) -> Result<TradingRecommendation> {
-        // Try to extract JSON from response
-        let json_start = llm_response.find('{');
-        let json_end = llm_response.rfind('}');
+        use tracing::warn;
 
-        if let (Some(start), Some(end)) = (json_start, json_end) {
-            let json_str = &llm_response[start..=end];
-            let parsed: serde_json::Value = serde_json::from_str(json_str)?;
-
-            Ok(TradingRecommendation {
-                id: Uuid::new_v4(),
-                action: parsed["action"]
-                    .as_str()
-                    .unwrap_or("HOLD")
-                    .to_string(),
-                confidence: parsed["confidence"].as_f64().unwrap_or(0.0) as f32,
-                reasoning: parsed["reasoning"]
-                    .as_str()
-                    .unwrap_or("No reasoning provided")
-                    .to_string(),
-                risk_factors: parsed["risk_factors"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            })
+        // Try to extract JSON from markdown code block first
+        let json_str = if let Some(code_block_start) = llm_response.find("```json") {
+            if let Some(code_block_end) = llm_response[code_block_start..].find("```") {
+                let start = code_block_start + 7;
+                let end = code_block_start + code_block_end;
+                if end > start {
+                    Some(&llm_response[start..end])
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else {
-            // Fallback if JSON parsing fails
+            None
+        };
+
+        // Fallback to finding first complete JSON object
+        let json_str = json_str.or_else(|| {
+            let mut brace_count = 0;
+            let mut start_idx = None;
+            let mut end_idx = None;
+
+            for (idx, ch) in llm_response.chars().enumerate() {
+                if ch == '{' {
+                    if start_idx.is_none() {
+                        start_idx = Some(idx);
+                    }
+                    brace_count += 1;
+                } else if ch == '}' {
+                    brace_count -= 1;
+                    if brace_count == 0 && start_idx.is_some() {
+                        end_idx = Some(idx + 1);
+                        break;
+                    }
+                }
+            }
+
+            if let (Some(start), Some(end)) = (start_idx, end_idx) {
+                Some(&llm_response[start..end])
+            } else {
+                None
+            }
+        });
+
+        if let Some(json_content) = json_str {
+            match serde_json::from_str::<serde_json::Value>(json_content) {
+                Ok(parsed) => {
+                    // Validate and normalize action field
+                    let action = parsed["action"]
+                        .as_str()
+                        .unwrap_or("HOLD")
+                        .to_uppercase();
+
+                    let normalized_action = match action.as_str() {
+                        "BUY" | "BUY_CALLS" | "BUY_PUTS" => action,
+                        "SELL" | "SELL_CALLS" | "SELL_PUTS" => action,
+                        "HOLD" | "STAY_FLAT" => "HOLD".to_string(),
+                        _ => {
+                            warn!("Invalid action '{}', defaulting to HOLD", action);
+                            "HOLD".to_string()
+                        }
+                    };
+
+                    // Validate and clamp confidence to [0.0, 1.0]
+                    let confidence = parsed["confidence"]
+                        .as_f64()
+                        .unwrap_or(0.0)
+                        .clamp(0.0, 1.0) as f32;
+
+                    Ok(TradingRecommendation {
+                        id: Uuid::new_v4(),
+                        action: normalized_action,
+                        confidence,
+                        reasoning: parsed["reasoning"]
+                            .as_str()
+                            .unwrap_or("No reasoning provided")
+                            .to_string(),
+                        risk_factors: parsed["risk_factors"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                }
+                Err(e) => {
+                    warn!("Failed to parse JSON from LLM response: {}", e);
+                    // Fallback if JSON parsing fails
+                    Ok(TradingRecommendation {
+                        id: Uuid::new_v4(),
+                        action: "HOLD".to_string(),
+                        confidence: 0.0,
+                        reasoning: "Failed to parse LLM response".to_string(),
+                        risk_factors: vec!["Parsing error".to_string()],
+                    })
+                }
+            }
+        } else {
+            warn!("No JSON found in LLM response, using default recommendation");
+            // Fallback if no JSON found
             Ok(TradingRecommendation {
                 id: Uuid::new_v4(),
                 action: "HOLD".to_string(),

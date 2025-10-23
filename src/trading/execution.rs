@@ -24,6 +24,34 @@ pub struct ExecutionParams {
     pub market_close: NaiveTime,
 }
 
+/// Moneyness category for options
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Moneyness {
+    /// In-the-money (tighter spreads)
+    ITM,
+    /// At-the-money (moderate spreads)
+    ATM,
+    /// Out-of-the-money (wider spreads)
+    OTM,
+}
+
+/// Parameters for dynamic slippage calculation
+#[derive(Debug, Clone)]
+pub struct DynamicSlippageParams {
+    /// Current VIX level
+    pub vix: f64,
+
+    /// Option moneyness
+    pub moneyness: Moneyness,
+}
+
+impl DynamicSlippageParams {
+    /// Create dynamic slippage params from VIX and moneyness
+    pub fn new(vix: f64, moneyness: Moneyness) -> Self {
+        Self { vix, moneyness }
+    }
+}
+
 impl Default for ExecutionParams {
     fn default() -> Self {
         Self {
@@ -44,16 +72,83 @@ pub enum OrderSide {
     Sell,
 }
 
+/// Calculate dynamic slippage percentage based on VIX and moneyness
+///
+/// VIX-based slippage:
+/// - VIX < 15: 2% slippage (low volatility)
+/// - VIX 15-25: 3% slippage (normal volatility)
+/// - VIX 25-35: 4% slippage (elevated volatility)
+/// - VIX > 35: 5% slippage (high volatility)
+///
+/// Moneyness adjustments:
+/// - ITM options: -0.5% (tighter spreads)
+/// - ATM options: 0% (no adjustment)
+/// - OTM options: +0.5% (wider spreads)
+pub fn calculate_dynamic_slippage(params: &DynamicSlippageParams) -> f64 {
+    // Base slippage from VIX
+    let vix_slippage = if params.vix < 15.0 {
+        0.02 // 2%
+    } else if params.vix < 25.0 {
+        0.03 // 3%
+    } else if params.vix < 35.0 {
+        0.04 // 4%
+    } else {
+        0.05 // 5%
+    };
+
+    // Moneyness adjustment
+    let moneyness_adjustment = match params.moneyness {
+        Moneyness::ITM => -0.005, // -0.5% for tighter spreads
+        Moneyness::ATM => 0.0,    // No adjustment
+        Moneyness::OTM => 0.005,  // +0.5% for wider spreads
+    };
+
+    // Ensure slippage stays positive
+    f64::max(vix_slippage + moneyness_adjustment, 0.01)
+}
+
 /// Calculate the fill price with slippage applied in the unfavorable direction
 ///
 /// For buys: market price + slippage (paying more)
 /// For sells: market price - slippage (receiving less)
+///
+/// Returns 0.0 if market_price is not finite
 pub fn calculate_fill_price(
     market_price: f64,
     side: OrderSide,
     params: &ExecutionParams,
 ) -> f64 {
+    // Validate inputs
+    if !market_price.is_finite() || market_price <= 0.0 {
+        return 0.0;
+    }
+
     let slippage = market_price * params.slippage_pct;
+
+    match side {
+        OrderSide::Buy => market_price + slippage,
+        OrderSide::Sell => market_price - slippage,
+    }
+}
+
+/// Calculate the fill price with dynamic slippage based on VIX and moneyness
+///
+/// For buys: market price + slippage (paying more)
+/// For sells: market price - slippage (receiving less)
+///
+/// Returns 0.0 if market_price is not finite
+pub fn calculate_fill_price_dynamic(
+    market_price: f64,
+    side: OrderSide,
+    dynamic_params: &DynamicSlippageParams,
+) -> f64 {
+    // Validate inputs
+    if !market_price.is_finite() || market_price <= 0.0 {
+        return 0.0;
+    }
+
+    let slippage_pct = calculate_dynamic_slippage(dynamic_params);
+    let slippage = market_price * slippage_pct;
 
     match side {
         OrderSide::Buy => market_price + slippage,
@@ -164,12 +259,18 @@ pub fn validate_execution(
         );
     }
 
-    // Check price validity
+    // Check price validity - must be finite and positive
+    if !market_price.is_finite() {
+        bail!("Invalid market price (NaN or infinity): {}", market_price);
+    }
     if market_price <= 0.0 {
         bail!("Invalid market price: {}", market_price);
     }
 
-    // Check shares validity
+    // Check shares validity - must be finite and positive
+    if !shares.is_finite() {
+        bail!("Invalid share count (NaN or infinity): {}", shares);
+    }
     if shares <= 0.0 {
         bail!("Invalid share count: {}", shares);
     }
@@ -369,5 +470,111 @@ mod tests {
             .with_timezone(&Utc);
 
         assert!(is_after_hours(after_hours));
+    }
+
+    #[test]
+    fn test_dynamic_slippage_low_vix() {
+        // VIX < 15: 2% base slippage
+        let params = DynamicSlippageParams::new(12.0, Moneyness::ATM);
+        let slippage = calculate_dynamic_slippage(&params);
+        assert_eq!(slippage, 0.02); // 2%
+    }
+
+    #[test]
+    fn test_dynamic_slippage_normal_vix() {
+        // VIX 15-25: 3% base slippage
+        let params = DynamicSlippageParams::new(20.0, Moneyness::ATM);
+        let slippage = calculate_dynamic_slippage(&params);
+        assert_eq!(slippage, 0.03); // 3%
+    }
+
+    #[test]
+    fn test_dynamic_slippage_elevated_vix() {
+        // VIX 25-35: 4% base slippage
+        let params = DynamicSlippageParams::new(30.0, Moneyness::ATM);
+        let slippage = calculate_dynamic_slippage(&params);
+        assert_eq!(slippage, 0.04); // 4%
+    }
+
+    #[test]
+    fn test_dynamic_slippage_high_vix() {
+        // VIX > 35: 5% base slippage
+        let params = DynamicSlippageParams::new(40.0, Moneyness::ATM);
+        let slippage = calculate_dynamic_slippage(&params);
+        assert_eq!(slippage, 0.05); // 5%
+    }
+
+    #[test]
+    fn test_dynamic_slippage_itm_adjustment() {
+        // ITM options have tighter spreads: -0.5%
+        let params = DynamicSlippageParams::new(20.0, Moneyness::ITM);
+        let slippage = calculate_dynamic_slippage(&params);
+        assert!((slippage - 0.025).abs() < 1e-10); // 3% - 0.5% = 2.5%
+    }
+
+    #[test]
+    fn test_dynamic_slippage_otm_adjustment() {
+        // OTM options have wider spreads: +0.5%
+        let params = DynamicSlippageParams::new(20.0, Moneyness::OTM);
+        let slippage = calculate_dynamic_slippage(&params);
+        assert!((slippage - 0.035).abs() < 1e-10); // 3% + 0.5% = 3.5%
+    }
+
+    #[test]
+    fn test_dynamic_slippage_edge_case_low_vix_itm() {
+        // Low VIX (2%) + ITM (-0.5%) = 1.5%
+        let params = DynamicSlippageParams::new(10.0, Moneyness::ITM);
+        let slippage = calculate_dynamic_slippage(&params);
+        assert_eq!(slippage, 0.015); // 2% - 0.5% = 1.5%
+    }
+
+    #[test]
+    fn test_dynamic_slippage_edge_case_high_vix_otm() {
+        // High VIX (5%) + OTM (+0.5%) = 5.5%
+        let params = DynamicSlippageParams::new(45.0, Moneyness::OTM);
+        let slippage = calculate_dynamic_slippage(&params);
+        assert_eq!(slippage, 0.055); // 5% + 0.5% = 5.5%
+    }
+
+    #[test]
+    fn test_calculate_fill_price_dynamic_buy_low_vix() {
+        let params = DynamicSlippageParams::new(12.0, Moneyness::ATM);
+        let market_price = 100.0;
+        let fill = calculate_fill_price_dynamic(market_price, OrderSide::Buy, &params);
+
+        // Should pay more than market price (2% slippage)
+        assert!(fill > market_price);
+        assert_eq!(fill, 102.0); // 100 + 2% slippage
+    }
+
+    #[test]
+    fn test_calculate_fill_price_dynamic_sell_high_vix() {
+        let params = DynamicSlippageParams::new(40.0, Moneyness::ATM);
+        let market_price = 100.0;
+        let fill = calculate_fill_price_dynamic(market_price, OrderSide::Sell, &params);
+
+        // Should receive less than market price (5% slippage)
+        assert!(fill < market_price);
+        assert_eq!(fill, 95.0); // 100 - 5% slippage
+    }
+
+    #[test]
+    fn test_calculate_fill_price_dynamic_itm_tighter_spreads() {
+        let params = DynamicSlippageParams::new(20.0, Moneyness::ITM);
+        let market_price = 100.0;
+        let fill = calculate_fill_price_dynamic(market_price, OrderSide::Buy, &params);
+
+        // Should pay less than ATM due to tighter spreads (2.5% vs 3%)
+        assert_eq!(fill, 102.5); // 100 + 2.5% slippage
+    }
+
+    #[test]
+    fn test_calculate_fill_price_dynamic_otm_wider_spreads() {
+        let params = DynamicSlippageParams::new(20.0, Moneyness::OTM);
+        let market_price = 100.0;
+        let fill = calculate_fill_price_dynamic(market_price, OrderSide::Buy, &params);
+
+        // Should pay more than ATM due to wider spreads (3.5% vs 3%)
+        assert_eq!(fill, 103.5); // 100 + 3.5% slippage
     }
 }

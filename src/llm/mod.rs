@@ -3,6 +3,8 @@
 
 use anyhow::{Context, Result};
 use async_openai::{Client as OpenAIClient, config::OpenAIConfig, types::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage, CreateChatCompletionRequest}};
+use chrono::{DateTime, NaiveTime, Utc};
+use chrono_tz::America::New_York;
 use ollama_rs::{Ollama, generation::completion::request::GenerationRequest};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -34,6 +36,7 @@ pub struct LLMConfig {
     pub timeout_seconds: u64,
     pub max_retries: u32,
     pub enable_fallback: bool,
+    pub force_retries: bool,  // Override time check for retries (for testing)
 }
 
 impl Default for LLMConfig {
@@ -46,6 +49,7 @@ impl Default for LLMConfig {
             timeout_seconds: 30,
             max_retries: 3,
             enable_fallback: true,
+            force_retries: false,
         }
     }
 }
@@ -226,6 +230,7 @@ impl LLMClient {
             timeout_seconds: config.llm.timeout_seconds,
             max_retries: 3,
             enable_fallback: true,
+            force_retries: false,
         };
 
         Self::new(llm_config).await
@@ -342,6 +347,14 @@ impl LLMClient {
             }
 
             if attempt < self.config.max_retries {
+                // Check if we're too close to market close
+                let now = Utc::now();
+                if !self.config.force_retries && is_too_close_to_market_close(now) {
+                    warn!("Skipping retry attempt {} - too close to market close (< 10 minutes to 4:00 PM ET). Use --force to override.",
+                          attempt + 1);
+                    break; // Exit retry loop
+                }
+
                 let backoff_seconds = 2_u64.pow(attempt - 1);
                 warn!("Retrying in {} seconds (attempt {}/{})",
                       backoff_seconds, attempt, self.config.max_retries);
@@ -447,6 +460,24 @@ Please respond with valid JSON only. Do not include any explanation or markdown 
     }
 }
 
+/// Check if current time is too close to market close (< 10 minutes to 4:00 PM ET)
+/// Returns true if retries should be skipped
+fn is_too_close_to_market_close(now: DateTime<Utc>) -> bool {
+    let et_time = now.with_timezone(&New_York);
+    let current_time = et_time.time();
+
+    // Market closes at 4:00 PM ET
+    let market_close = NaiveTime::from_hms_opt(16, 0, 0)
+        .expect("Invalid hardcoded time 16:00:00 - this is a bug");
+
+    // 10 minutes before market close
+    let retry_cutoff = NaiveTime::from_hms_opt(15, 50, 0)
+        .expect("Invalid hardcoded time 15:50:00 - this is a bug");
+
+    // If current time is between 3:50 PM and 4:00 PM ET, skip retries
+    current_time >= retry_cutoff && current_time < market_close
+}
+
 /// Extract JSON from text that might contain markdown or other formatting
 fn extract_json_from_text(text: &str) -> Option<String> {
     // First try to find JSON wrapped in markdown code blocks
@@ -510,16 +541,66 @@ mod tests {
         let text1 = r#"Here is the JSON: {"key": "value", "number": 42}"#;
         let extracted1 = extract_json_from_text(text1);
         assert_eq!(extracted1, Some(r#"{"key": "value", "number": 42}"#.to_string()));
-        
+
         let text2 = r#"```json
 {"action": "BUY_CALLS", "confidence": 0.8}
 ```"#;
         let extracted2 = extract_json_from_text(text2);
         assert_eq!(extracted2, Some(r#"{"action": "BUY_CALLS", "confidence": 0.8}"#.to_string()));
-        
+
         let text3 = "This is not JSON at all";
         let extracted3 = extract_json_from_text(text3);
         assert_eq!(extracted3, None);
+    }
+
+    #[test]
+    fn test_is_too_close_to_market_close_before_cutoff() {
+        // 3:45 PM ET (before 3:50 PM cutoff)
+        let time = chrono::DateTime::parse_from_rfc3339("2025-01-06T20:45:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(!is_too_close_to_market_close(time));
+    }
+
+    #[test]
+    fn test_is_too_close_to_market_close_after_cutoff() {
+        // 3:55 PM ET (after 3:50 PM cutoff, before 4:00 PM)
+        let time = chrono::DateTime::parse_from_rfc3339("2025-01-06T20:55:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(is_too_close_to_market_close(time));
+    }
+
+    #[test]
+    fn test_is_too_close_to_market_close_exactly_at_cutoff() {
+        // 3:50 PM ET (exactly at cutoff)
+        let time = chrono::DateTime::parse_from_rfc3339("2025-01-06T20:50:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(is_too_close_to_market_close(time));
+    }
+
+    #[test]
+    fn test_is_too_close_to_market_close_after_close() {
+        // 4:05 PM ET (after market close)
+        let time = chrono::DateTime::parse_from_rfc3339("2025-01-06T21:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(!is_too_close_to_market_close(time));
+    }
+
+    #[test]
+    fn test_is_too_close_to_market_close_exactly_at_close() {
+        // 4:00 PM ET (exactly at market close)
+        let time = chrono::DateTime::parse_from_rfc3339("2025-01-06T21:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(!is_too_close_to_market_close(time));
     }
     
     #[tokio::test]

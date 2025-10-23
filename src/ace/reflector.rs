@@ -11,6 +11,7 @@ use crate::{
         delta::Delta,
         playbook::{PlaybookBullet, PlaybookSection},
         prompts::{ACEPrompts, ReflectionResult, TradingDecision},
+        sanitize::validate_reflection_result,
     },
     llm::LLMClient,
 };
@@ -167,6 +168,16 @@ impl Reflector {
             .generate_json::<ReflectionResult>(&prompt, None)
             .await
             .context("Failed to get LLM reflection")?;
+
+        // Validate the reflection
+        let reflection_json = serde_json::to_value(&response)?;
+        if let Err(validation_error) = validate_reflection_result(&reflection_json) {
+            warn!("LLM reflection failed validation: {}", validation_error);
+            warn!("Using heuristic reflection instead");
+            return self.generate_heuristic_reflection(&input);
+        }
+
+        info!("Reflection passed validation");
 
         // Convert reflection to deltas
         let deltas = self.reflection_to_deltas(response, &input)?;

@@ -1,8 +1,8 @@
-///! Integration tests for ACE pipeline
-///! Tests the end-to-end flow from data → indicators → ACE context
+//! Integration tests for ACE pipeline
+//! Tests the end-to-end flow from data → indicators → ACE context
 
-use traderjoe::data::{compute_indicators, OHLCV, TrendSignal};
 use chrono::NaiveDate;
+use traderjoe::data::{compute_indicators, TrendSignal, OHLCV};
 
 #[test]
 fn test_technical_indicators_computation() {
@@ -32,7 +32,10 @@ fn test_technical_indicators_computation() {
     assert!(signals.sma_50.is_some(), "SMA 50 should be computed");
 
     if let Some(rsi) = signals.rsi_14 {
-        assert!(rsi >= 0.0 && rsi <= 100.0, "RSI should be between 0 and 100");
+        assert!(
+            rsi >= 0.0 && rsi <= 100.0,
+            "RSI should be between 0 and 100"
+        );
     }
 
     if let Some(sma_20) = signals.sma_20 {
@@ -42,7 +45,8 @@ fn test_technical_indicators_computation() {
     // With upward trend, should show bullish or buy signal
     assert!(
         signals.signal == TrendSignal::Buy || signals.signal == TrendSignal::StrongBuy,
-        "Upward trend should produce buy signal, got: {:?}", signals.signal
+        "Upward trend should produce buy signal, got: {:?}",
+        signals.signal
     );
 
     println!("✅ Technical indicators test passed");
@@ -51,24 +55,28 @@ fn test_technical_indicators_computation() {
 #[test]
 fn test_technical_indicators_with_insufficient_data() {
     // Test with insufficient data (< 14 days for RSI)
-    let data = vec![
-        OHLCV {
-            symbol: "SPY".to_string(),
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            open: 400.0,
-            high: 405.0,
-            low: 398.0,
-            close: 402.0,
-            volume: 50_000_000,
-            source: "test".to_string(),
-        },
-    ];
+    let data = vec![OHLCV {
+        symbol: "SPY".to_string(),
+        date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        open: 400.0,
+        high: 405.0,
+        low: 398.0,
+        close: 402.0,
+        volume: 50_000_000,
+        source: "test".to_string(),
+    }];
 
     let signals = compute_indicators(&data);
 
     // Should handle gracefully
-    assert!(signals.rsi_14.is_none(), "RSI should be None with insufficient data");
-    assert!(signals.sma_20.is_none(), "SMA 20 should be None with insufficient data");
+    assert!(
+        signals.rsi_14.is_none(),
+        "RSI should be None with insufficient data"
+    );
+    assert!(
+        signals.sma_20.is_none(),
+        "SMA 20 should be None with insufficient data"
+    );
 
     println!("✅ Insufficient data handling test passed");
 }
@@ -110,8 +118,11 @@ fn test_bearish_trend_detection() {
 
     // Downward trend should produce bearish signal
     assert!(
-        signals.signal == TrendSignal::Sell || signals.signal == TrendSignal::StrongSell || signals.signal == TrendSignal::Neutral,
-        "Downward trend should produce sell or neutral signal, got: {:?}", signals.signal
+        signals.signal == TrendSignal::Sell
+            || signals.signal == TrendSignal::StrongSell
+            || signals.signal == TrendSignal::Neutral,
+        "Downward trend should produce sell or neutral signal, got: {:?}",
+        signals.signal
     );
 
     println!("✅ Bearish trend detection test passed");

@@ -117,11 +117,44 @@ impl CircuitBreaker {
             LIMIT 1
             "#
         )
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .context("Failed to fetch circuit breaker state")?;
 
-        Ok(state)
+        // If no state exists, create a default one
+        match state {
+            Some(state) => Ok(state),
+            None => {
+                info!("No circuit breaker state found, creating default state");
+                let now = Utc::now();
+                let id = Uuid::new_v4();
+
+                sqlx::query!(
+                    r#"
+                    INSERT INTO circuit_breakers (id, is_halted, created_at)
+                    VALUES ($1, $2, $3)
+                    "#,
+                    id,
+                    false,
+                    now
+                )
+                .execute(&self.pool)
+                .await
+                .context("Failed to create default circuit breaker state")?;
+
+                Ok(CircuitBreakerState {
+                    id,
+                    is_halted: false,
+                    reason: None,
+                    halted_at: None,
+                    resumed_at: None,
+                    triggered_by: None,
+                    notes: None,
+                    version: None,
+                    created_at: now,
+                })
+            }
+        }
     }
 
     /// Get current circuit breaker state with row-level lock (for update)
@@ -146,11 +179,44 @@ impl CircuitBreaker {
             FOR UPDATE
             "#
         )
-        .fetch_one(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .context("Failed to fetch circuit breaker state with lock")?;
 
-        Ok(state)
+        // If no state exists, create a default one within the transaction
+        match state {
+            Some(state) => Ok(state),
+            None => {
+                info!("No circuit breaker state found in transaction, creating default state");
+                let now = Utc::now();
+                let id = Uuid::new_v4();
+
+                sqlx::query!(
+                    r#"
+                    INSERT INTO circuit_breakers (id, is_halted, created_at)
+                    VALUES ($1, $2, $3)
+                    "#,
+                    id,
+                    false,
+                    now
+                )
+                .execute(&mut **tx)
+                .await
+                .context("Failed to create default circuit breaker state in transaction")?;
+
+                Ok(CircuitBreakerState {
+                    id,
+                    is_halted: false,
+                    reason: None,
+                    halted_at: None,
+                    resumed_at: None,
+                    triggered_by: None,
+                    notes: None,
+                    version: None,
+                    created_at: now,
+                })
+            }
+        }
     }
 
     /// Check if trading should be halted and update state if necessary

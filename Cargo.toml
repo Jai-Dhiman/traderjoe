@@ -12,12 +12,10 @@ categories = ["finance", "ai", "data-analysis"]
 [dependencies]
 # Async Runtime
 tokio = { version = "1.0", features = ["full"] }
-
 tokio-retry = "0.3"
 
 # Database
 sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "migrate", "uuid", "chrono", "json"] }
-postgres = "0.19"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # CLI Framework
@@ -27,6 +25,8 @@ colored = "2.0"
 # HTTP Client & APIs
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 url = "2.4"
+roux = "2.2"  # Reddit API client
+urlencoding = "2.1"  # URL encoding for API queries
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -35,11 +35,11 @@ toml = "0.8"
 
 # Date/Time
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 
 # LLM Integration
 ollama-rs = "0.1"
-# openai-api-rs = "5.0"  # TODO: Add when available
-# anthropic = "0.1"  # TODO: Add when available
+async-openai = "0.24"
 
 # ML Models (Local) - Use newer versions
 candle-core = "0.9"
@@ -59,7 +59,6 @@ tracing-appender = "0.2"
 # Error Handling
 anyhow = "1.0"
 thiserror = "1.0"
-eyre = "0.6"
 
 # Configuration
 dotenv = "0.15"
@@ -70,17 +69,13 @@ config = "0.13"
 # linfa = "0.7"
 
 # Statistics & Math
-statrs = "0.16"
 rand = "0.8"
-rand_distr = "0.4"
 
 # Utilities
 futures = "0.3"
-once_cell = "1.19"
 lazy_static = "1.4"
-dashmap = "5.5"
-parking_lot = "0.12"
-rayon = "1.8"
+regex = "1.10"
+sysinfo = "0.30"
 
 # Development Dependencies
 [dev-dependencies]

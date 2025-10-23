@@ -164,7 +164,12 @@ impl AccountManager {
                 slippage_pct as "slippage_pct!",
                 max_favorable_excursion,
                 max_adverse_excursion,
-                exit_reason as "exit_reason: ExitReason"
+                exit_reason as "exit_reason: ExitReason",
+                estimated_slippage_pct,
+                actual_entry_slippage_pct,
+                actual_exit_slippage_pct,
+                market_vix,
+                option_moneyness
             FROM paper_trades
             WHERE
                 status = 'CLOSED'
@@ -266,11 +271,22 @@ impl AccountManager {
         // Calculate max drawdown
         let (max_drawdown, max_drawdown_pct) = self.calculate_max_drawdown(&trades, initial_balance)?;
 
-        // Calculate Sharpe ratio (simplified)
-        let sharpe_ratio = if days > 0 {
-            let daily_returns: Vec<f64> = trades
-                .iter()
-                .filter_map(|t| t.pnl_pct)
+        // Calculate Sharpe ratio from daily aggregated returns
+        let sharpe_ratio = if days > 0 && !trades.is_empty() {
+            use std::collections::HashMap;
+            let mut daily_pnl: HashMap<String, f64> = HashMap::new();
+
+            // Aggregate P&L by day (multiple trades can occur on same day)
+            for trade in &trades {
+                if let (Some(exit_time), Some(pnl)) = (trade.exit_time, trade.pnl) {
+                    let date_key = exit_time.format("%Y-%m-%d").to_string();
+                    *daily_pnl.entry(date_key).or_insert(0.0) += pnl;
+                }
+            }
+
+            // Convert daily P&L to daily returns as percentage of initial balance
+            let daily_returns: Vec<f64> = daily_pnl.values()
+                .map(|&pnl| pnl / initial_balance)
                 .collect();
 
             self.calculate_sharpe_ratio(&daily_returns)

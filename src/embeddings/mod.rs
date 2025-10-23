@@ -119,8 +119,17 @@ impl EmbeddingGemma {
             }
         }
 
-        // Generate embedding using actual model
-        let embedding = self.generate_embedding(text)?;
+        // Clone necessary data for the blocking task
+        let text_owned = text.to_string();
+        let tokenizer = self.tokenizer.clone();
+        let device = self.device.clone();
+        let model = self.model.clone();
+
+        // Generate embedding using actual model in a blocking task
+        let embedding = tokio::task::spawn_blocking(move || {
+            Self::generate_embedding_sync(&tokenizer, &device, &model, &text_owned)
+        })
+        .await??;
 
         // Cache the result
         {
@@ -131,26 +140,32 @@ impl EmbeddingGemma {
         Ok(embedding)
     }
 
-    /// Generate embedding using the actual Gemma model
-    fn generate_embedding(&self, text: &str) -> Result<Vec<f32>> {
+    /// Generate embedding using the actual Gemma model (synchronous, CPU-intensive)
+    ///
+    /// This is a static method designed to be called from spawn_blocking
+    fn generate_embedding_sync(
+        tokenizer: &Tokenizer,
+        device: &Device,
+        model: &Arc<Mutex<Model>>,
+        text: &str,
+    ) -> Result<Vec<f32>> {
         // Tokenize the input text
-        let encoding = self
-            .tokenizer
+        let encoding = tokenizer
             .encode(text, false)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
         let tokens = encoding.get_ids();
-        let token_ids = Tensor::new(tokens, &self.device)?
+        let token_ids = Tensor::new(tokens, device)?
             .unsqueeze(0)?; // Add batch dimension
 
         // Run forward pass through the model (need to block on mutex)
-        let mut model = self.model.blocking_lock();
-        let output = model.forward(&token_ids, 0)?;
-        drop(model);
+        let mut model_guard = model.blocking_lock();
+        let output = model_guard.forward(&token_ids, 0)?;
+        drop(model_guard);
 
         // Extract embeddings from the last hidden state
         // We'll use mean pooling over the sequence dimension
-        let embedding = self.mean_pool(&output)?;
+        let embedding = Self::mean_pool_static(&output)?;
 
         // Convert to Vec<f32>
         let embedding_vec = embedding.to_vec1::<f32>()?;
@@ -166,8 +181,8 @@ impl EmbeddingGemma {
         Ok(normalized)
     }
 
-    /// Mean pooling over sequence dimension
-    fn mean_pool(&self, tensor: &Tensor) -> Result<Tensor> {
+    /// Mean pooling over sequence dimension (static version)
+    fn mean_pool_static(tensor: &Tensor) -> Result<Tensor> {
         // tensor shape: [batch_size, seq_len, hidden_dim]
         // We want to average over seq_len dimension
         let sum = tensor.sum(1)?; // Sum over sequence dimension

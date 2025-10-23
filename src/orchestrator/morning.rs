@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use tracing::{error, info, warn};
 
 use crate::{
-    ace::{ACEPrompts, ContextDAO, PlaybookDAO, TradingDecision},
+    ace::{sanitize::validate_trading_decision, ACEPrompts, ContextDAO, PlaybookDAO, TradingDecision},
     config::Config,
     data::{MarketDataClient, ResearchClient, SentimentClient},
     embeddings::EmbeddingGemma,
@@ -103,7 +103,7 @@ impl MorningOrchestrator {
         info!("🧠 Retrieving similar historical contexts...");
         let similar_contexts = self.retrieve_similar_contexts(&market_state).await?;
 
-        // Step 6: Get relevant playbook entries (placeholder for now)
+        // Step 6: Get relevant playbook entries
         let playbook_entries = self.get_playbook_entries(&market_state).await?;
 
         // Step 7: Generate decision via LLM
@@ -191,8 +191,8 @@ impl MorningOrchestrator {
         let volatility = market_data["volatility_20d"].as_f64().unwrap_or(0.0);
         let latest_price = market_data["latest_price"].as_f64().unwrap_or(0.0);
 
-        // Calculate real technical indicators instead of placeholders
-        // RSI based on daily change momentum
+        // Calculate simplified technical indicators for quick momentum assessment
+        // RSI approximation based on daily change momentum (not standard 14-period RSI)
         let rsi = 50.0 + (daily_change * 5.0).clamp(-50.0, 50.0);
 
         // MACD signal based on trend
@@ -223,7 +223,9 @@ impl MorningOrchestrator {
             let mut conf: f32 = 0.5; // Base confidence
 
             // Increase confidence when signals align
-            if (daily_change > 0.5 && volume_signal == "high") || (daily_change < -0.5 && volume_signal == "high") {
+            if (daily_change > 0.5 && volume_signal == "high")
+                || (daily_change < -0.5 && volume_signal == "high")
+            {
                 conf += 0.2; // Strong volume confirms move
             }
 
@@ -360,12 +362,11 @@ impl MorningOrchestrator {
     /// Get relevant playbook entries from the ACE playbook database
     async fn get_playbook_entries(&self, _market_state: &Value) -> Result<Vec<String>> {
         // Query playbook bullets from the last 30 days with high confidence
-        let bullets = self.playbook_dao
-            .get_recent_bullets(30, 20)
-            .await?;
+        let bullets = self.playbook_dao.get_recent_bullets(30, 20).await?;
 
         // Filter for high confidence bullets and return their content
-        let entries: Vec<String> = bullets.iter()
+        let entries: Vec<String> = bullets
+            .iter()
             .filter(|b| b.confidence > 0.6)
             .map(|b| b.content.clone())
             .collect();
@@ -402,6 +403,18 @@ impl MorningOrchestrator {
                     decision.action,
                     decision.confidence * 100.0
                 );
+
+                // Validate the decision
+                let decision_json = serde_json::to_value(&decision)?;
+                if let Err(validation_error) = validate_trading_decision(&decision_json) {
+                    warn!("LLM decision failed validation: {}", validation_error);
+                    warn!("Using fallback decision instead");
+                    return Ok(self
+                        .generate_fallback_decision(market_state, ml_signals)
+                        .await);
+                }
+
+                info!("Decision passed validation");
                 Ok(decision)
             }
             Err(e) => {

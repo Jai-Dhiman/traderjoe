@@ -70,3 +70,4 @@ tmp/
 /docs/_build/
 
 WARP.md
+.claude/
