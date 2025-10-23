@@ -113,15 +113,28 @@ pub enum Commands {
         /// Start date for backtest
         #[arg(short, long)]
         start_date: NaiveDate,
-        
+
         /// End date for backtest
         #[arg(short, long)]
         end_date: NaiveDate,
-        
+
         /// Strategy to test
         #[arg(short = 't', long, default_value = "ace")]
         strategy: String,
     },
+
+    /// Display open positions and account status
+    Positions,
+
+    /// Display performance metrics and statistics
+    Performance {
+        /// Number of days to analyze (default: 30)
+        #[arg(short, long)]
+        days: Option<i32>,
+    },
+
+    /// Review all pending contexts
+    ReviewAll,
 }
 
 /// Execute CLI command with database pool
@@ -167,9 +180,21 @@ pub async fn run(cli: Cli, pool: PgPool) -> Result<()> {
             commands::playbook_stats(pool).await?;
         }
         Commands::Backtest { start_date, end_date, strategy } => {
-            info!("Running backtest from {} to {} with strategy {}", 
+            info!("Running backtest from {} to {} with strategy {}",
                   start_date, end_date, strategy);
             commands::backtest(pool, start_date, end_date, strategy).await?;
+        }
+        Commands::Positions => {
+            info!("Displaying open positions");
+            commands::positions(pool).await?;
+        }
+        Commands::Performance { days } => {
+            info!("Displaying performance metrics");
+            commands::performance(pool, days).await?;
+        }
+        Commands::ReviewAll => {
+            info!("Running batch review for all pending contexts");
+            commands::review_all(pool).await?;
         }
     }
     Ok(())

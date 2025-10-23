@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
-use tracing::{info, warn, debug};
 
 /// Valid playbook sections based on ACE framework
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,9 +102,9 @@ impl PlaybookBullet {
 
     /// Check if bullet should be pruned based on performance
     pub fn should_prune(&self, min_confidence: f32, max_staleness_days: i64) -> bool {
-        self.confidence < min_confidence && 
-        self.harmful_count > self.helpful_count &&
-        self.is_stale(max_staleness_days)
+        self.confidence < min_confidence
+            && self.harmful_count > self.helpful_count
+            && self.is_stale(max_staleness_days)
     }
 }
 
@@ -158,16 +158,15 @@ impl PlaybookDAO {
         .await
         .context("Failed to insert playbook bullet")?;
 
-        info!("Inserted playbook bullet {} in section {}", bullet_id, section_str);
+        info!(
+            "Inserted playbook bullet {} in section {}",
+            bullet_id, section_str
+        );
         Ok(bullet_id)
     }
 
     /// Update bullet content
-    pub async fn update_bullet_content(
-        &self,
-        bullet_id: Uuid,
-        content: String,
-    ) -> Result<bool> {
+    pub async fn update_bullet_content(&self, bullet_id: Uuid, content: String) -> Result<bool> {
         let result = sqlx::query!(
             "UPDATE playbook_bullets SET content = $1 WHERE id = $2",
             content,
@@ -215,8 +214,10 @@ impl PlaybookDAO {
 
         let updated = result.rows_affected() > 0;
         if updated {
-            debug!("Updated counters for bullet {}: +{} helpful, +{} harmful, {:+.3} confidence", 
-                   bullet_id, helpful_delta, harmful_delta, confidence_adjustment);
+            debug!(
+                "Updated counters for bullet {}: +{} helpful, +{} harmful, {:+.3} confidence",
+                bullet_id, helpful_delta, harmful_delta, confidence_adjustment
+            );
         } else {
             warn!("No bullet found with id {} to update counters", bullet_id);
         }
@@ -244,13 +245,10 @@ impl PlaybookDAO {
 
     /// Delete bullet by ID
     pub async fn delete_bullet(&self, bullet_id: Uuid) -> Result<bool> {
-        let result = sqlx::query!(
-            "DELETE FROM playbook_bullets WHERE id = $1",
-            bullet_id
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to delete bullet")?;
+        let result = sqlx::query!("DELETE FROM playbook_bullets WHERE id = $1", bullet_id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete bullet")?;
 
         let deleted = result.rows_affected() > 0;
         if deleted {
@@ -288,28 +286,45 @@ impl PlaybookDAO {
         .await
         .context("Failed to get bullets by section")?;
 
-        let bullets = rows.into_iter()
-            .map(|row| PlaybookBullet {
-                id: row.id,
-                section: PlaybookSection::from_str(&row.section).unwrap(),
-                content: row.content,
-                helpful_count: row.helpful_count,
-                harmful_count: row.harmful_count,
-                confidence: row.confidence,
-                last_used: row.last_used,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                source_context_id: row.source_context_id,
-                meta: row.meta,
+        let bullets: Vec<PlaybookBullet> = rows
+            .into_iter()
+            .filter_map(|row| {
+                match PlaybookSection::from_str(&row.section) {
+                    Ok(section) => Some(PlaybookBullet {
+                        id: row.id,
+                        section,
+                        content: row.content,
+                        helpful_count: row.helpful_count,
+                        harmful_count: row.harmful_count,
+                        confidence: row.confidence,
+                        last_used: row.last_used,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at,
+                        source_context_id: row.source_context_id,
+                        meta: row.meta,
+                    }),
+                    Err(e) => {
+                        warn!("Skipping bullet {} with invalid section '{}': {}", row.id, row.section, e);
+                        None
+                    }
+                }
             })
             .collect();
 
-        debug!("Retrieved {} bullets for section {}", bullets.len(), section_str);
+        debug!(
+            "Retrieved {} bullets for section {}",
+            bullets.len(),
+            section_str
+        );
         Ok(bullets)
     }
 
     /// Search bullets by content text
-    pub async fn search_by_text(&self, query: &str, limit: Option<usize>) -> Result<Vec<PlaybookBullet>> {
+    pub async fn search_by_text(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<PlaybookBullet>> {
         let limit = limit.unwrap_or(20) as i64;
 
         let rows = sqlx::query!(
@@ -329,23 +344,36 @@ impl PlaybookDAO {
         .await
         .context("Failed to search bullets by text")?;
 
-        let bullets = rows.into_iter()
-            .map(|row| PlaybookBullet {
-                id: row.id,
-                section: PlaybookSection::from_str(&row.section).unwrap(),
-                content: row.content,
-                helpful_count: row.helpful_count,
-                harmful_count: row.harmful_count,
-                confidence: row.confidence,
-                last_used: row.last_used,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                source_context_id: row.source_context_id,
-                meta: row.meta,
+        let bullets: Vec<PlaybookBullet> = rows
+            .into_iter()
+            .filter_map(|row| {
+                match PlaybookSection::from_str(&row.section) {
+                    Ok(section) => Some(PlaybookBullet {
+                        id: row.id,
+                        section,
+                        content: row.content,
+                        helpful_count: row.helpful_count,
+                        harmful_count: row.harmful_count,
+                        confidence: row.confidence,
+                        last_used: row.last_used,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at,
+                        source_context_id: row.source_context_id,
+                        meta: row.meta,
+                    }),
+                    Err(e) => {
+                        warn!("Skipping bullet {} with invalid section '{}': {}", row.id, row.section, e);
+                        None
+                    }
+                }
             })
             .collect();
 
-        debug!("Found {} bullets matching text query: {}", bullets.len(), query);
+        debug!(
+            "Found {} bullets matching text query: {}",
+            bullets.len(),
+            query
+        );
         Ok(bullets)
     }
 
@@ -368,19 +396,28 @@ impl PlaybookDAO {
         .await
         .context("Failed to get top confident bullets")?;
 
-        let bullets = rows.into_iter()
-            .map(|row| PlaybookBullet {
-                id: row.id,
-                section: PlaybookSection::from_str(&row.section).unwrap(),
-                content: row.content,
-                helpful_count: row.helpful_count,
-                harmful_count: row.harmful_count,
-                confidence: row.confidence,
-                last_used: row.last_used,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                source_context_id: row.source_context_id,
-                meta: row.meta,
+        let bullets: Vec<PlaybookBullet> = rows
+            .into_iter()
+            .filter_map(|row| {
+                match PlaybookSection::from_str(&row.section) {
+                    Ok(section) => Some(PlaybookBullet {
+                        id: row.id,
+                        section,
+                        content: row.content,
+                        helpful_count: row.helpful_count,
+                        harmful_count: row.harmful_count,
+                        confidence: row.confidence,
+                        last_used: row.last_used,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at,
+                        source_context_id: row.source_context_id,
+                        meta: row.meta,
+                    }),
+                    Err(e) => {
+                        warn!("Skipping bullet {} with invalid section '{}': {}", row.id, row.section, e);
+                        None
+                    }
+                }
             })
             .collect();
 
@@ -410,23 +447,36 @@ impl PlaybookDAO {
         .await
         .context("Failed to get recent bullets")?;
 
-        let bullets = rows.into_iter()
-            .map(|row| PlaybookBullet {
-                id: row.id,
-                section: PlaybookSection::from_str(&row.section).unwrap(),
-                content: row.content,
-                helpful_count: row.helpful_count,
-                harmful_count: row.harmful_count,
-                confidence: row.confidence,
-                last_used: row.last_used,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                source_context_id: row.source_context_id,
-                meta: row.meta,
+        let bullets: Vec<PlaybookBullet> = rows
+            .into_iter()
+            .filter_map(|row| {
+                match PlaybookSection::from_str(&row.section) {
+                    Ok(section) => Some(PlaybookBullet {
+                        id: row.id,
+                        section,
+                        content: row.content,
+                        helpful_count: row.helpful_count,
+                        harmful_count: row.harmful_count,
+                        confidence: row.confidence,
+                        last_used: row.last_used,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at,
+                        source_context_id: row.source_context_id,
+                        meta: row.meta,
+                    }),
+                    Err(e) => {
+                        warn!("Skipping bullet {} with invalid section '{}': {}", row.id, row.section, e);
+                        None
+                    }
+                }
             })
             .collect();
 
-        debug!("Retrieved {} bullets used in last {} days", bullets.len(), days);
+        debug!(
+            "Retrieved {} bullets used in last {} days",
+            bullets.len(),
+            days
+        );
         Ok(bullets)
     }
 
@@ -449,23 +499,36 @@ impl PlaybookDAO {
         .await
         .context("Failed to get stale bullets")?;
 
-        let bullets = rows.into_iter()
-            .map(|row| PlaybookBullet {
-                id: row.id,
-                section: PlaybookSection::from_str(&row.section).unwrap(),
-                content: row.content,
-                helpful_count: row.helpful_count,
-                harmful_count: row.harmful_count,
-                confidence: row.confidence,
-                last_used: row.last_used,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                source_context_id: row.source_context_id,
-                meta: row.meta,
+        let bullets: Vec<PlaybookBullet> = rows
+            .into_iter()
+            .filter_map(|row| {
+                match PlaybookSection::from_str(&row.section) {
+                    Ok(section) => Some(PlaybookBullet {
+                        id: row.id,
+                        section,
+                        content: row.content,
+                        helpful_count: row.helpful_count,
+                        harmful_count: row.harmful_count,
+                        confidence: row.confidence,
+                        last_used: row.last_used,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at,
+                        source_context_id: row.source_context_id,
+                        meta: row.meta,
+                    }),
+                    Err(e) => {
+                        warn!("Skipping bullet {} with invalid section '{}': {}", row.id, row.section, e);
+                        None
+                    }
+                }
             })
             .collect();
 
-        debug!("Found {} stale bullets older than {} days", bullets.len(), days_threshold);
+        debug!(
+            "Found {} stale bullets older than {} days",
+            bullets.len(),
+            days_threshold
+        );
         Ok(bullets)
     }
 
@@ -481,8 +544,14 @@ impl PlaybookDAO {
 
         // Build dynamic query based on filters
         if let Some(sections) = &filters.sections {
-            let section_strs: Vec<String> = sections.iter()
-                .map(|s| format!("${}", {param_count += 1; param_count - 1}))
+            let section_strs: Vec<String> = sections
+                .iter()
+                .map(|s| {
+                    format!("${}", {
+                        param_count += 1;
+                        param_count - 1
+                    })
+                })
                 .collect();
             query.push_str(&format!(" AND section IN ({})", section_strs.join(",")));
             params.extend(sections.iter().map(|s| s.as_str().to_string()));
@@ -508,18 +577,27 @@ impl PlaybookDAO {
 
         if let Some(days) = filters.only_recent {
             let since = Utc::now() - chrono::Duration::days(days);
-            query.push_str(&format!(" AND (last_used >= ${} OR (last_used IS NULL AND created_at >= ${}))", param_count, param_count));
+            query.push_str(&format!(
+                " AND (last_used >= ${} OR (last_used IS NULL AND created_at >= ${}))",
+                param_count, param_count
+            ));
             params.push(since.to_rfc3339());
             param_count += 1;
         }
 
         if let Some(search_text) = &filters.content_search {
-            query.push_str(&format!(" AND to_tsvector('english', content) @@ plainto_tsquery('english', ${})", param_count));
+            query.push_str(&format!(
+                " AND to_tsvector('english', content) @@ plainto_tsquery('english', ${})",
+                param_count
+            ));
             params.push(search_text.clone());
             param_count += 1;
         }
 
-        query.push_str(&format!(" ORDER BY confidence DESC, helpful_count DESC LIMIT ${}", param_count));
+        query.push_str(&format!(
+            " ORDER BY confidence DESC, helpful_count DESC LIMIT ${}",
+            param_count
+        ));
         params.push(limit.to_string());
 
         // Note: This is a simplified implementation. In production, you'd want to use sqlx's
@@ -617,8 +695,9 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires TEST_DATABASE_URL
     async fn test_playbook_bullet_lifecycle() {
-        let database_url = std::env::var("TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost/traderjoe_test".to_string());
+        let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost/traderjoe_test".to_string()
+        });
 
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
@@ -635,15 +714,19 @@ mod tests {
         let dao = PlaybookDAO::new(pool);
 
         // Test insert
-        let bullet_id = dao.insert_bullet(
-            PlaybookSection::PatternInsights,
-            "When VIX > 30, calls have 65% win rate".to_string(),
-            None,
-            Some(json!({"test": true})),
-        ).await.expect("Failed to insert bullet");
+        let bullet_id = dao
+            .insert_bullet(
+                PlaybookSection::PatternInsights,
+                "When VIX > 30, calls have 65% win rate".to_string(),
+                None,
+                Some(json!({"test": true})),
+            )
+            .await
+            .expect("Failed to insert bullet");
 
         // Test retrieval by section
-        let bullets = dao.get_by_section(PlaybookSection::PatternInsights, Some(10))
+        let bullets = dao
+            .get_by_section(PlaybookSection::PatternInsights, Some(10))
             .await
             .expect("Failed to get bullets by section");
 
@@ -657,19 +740,22 @@ mod tests {
         assert_eq!(bullet.confidence, 0.5);
 
         // Test counter updates
-        let updated = dao.update_counters(bullet_id, 3, 1, 0.1)
+        let updated = dao
+            .update_counters(bullet_id, 3, 1, 0.1)
             .await
             .expect("Failed to update counters");
         assert!(updated);
 
         // Test last_used update
-        let updated = dao.update_last_used(bullet_id)
+        let updated = dao
+            .update_last_used(bullet_id)
             .await
             .expect("Failed to update last_used");
         assert!(updated);
 
         // Verify updates
-        let bullets = dao.get_by_section(PlaybookSection::PatternInsights, Some(10))
+        let bullets = dao
+            .get_by_section(PlaybookSection::PatternInsights, Some(10))
             .await
             .expect("Failed to get bullets after update");
 
@@ -680,7 +766,8 @@ mod tests {
         assert!(bullet.last_used.is_some());
 
         // Test search
-        let found = dao.search_by_text("VIX", Some(5))
+        let found = dao
+            .search_by_text("VIX", Some(5))
             .await
             .expect("Failed to search bullets");
         assert!(!found.is_empty());
@@ -690,7 +777,8 @@ mod tests {
         assert!(stats.total_bullets > 0);
 
         // Test delete
-        let deleted = dao.delete_bullet(bullet_id)
+        let deleted = dao
+            .delete_bullet(bullet_id)
             .await
             .expect("Failed to delete bullet");
         assert!(deleted);
@@ -730,11 +818,11 @@ mod tests {
 
         // Test staleness
         assert!(!bullet.is_stale(15)); // Not stale within 15 days
-        assert!(bullet.is_stale(5));   // Stale beyond 5 days
+        assert!(bullet.is_stale(5)); // Stale beyond 5 days
 
         // Test pruning logic
         assert!(!bullet.should_prune(0.5, 30)); // High confidence, not prunable
-        
+
         let low_conf_bullet = PlaybookBullet {
             confidence: 0.3,
             harmful_count: 5,

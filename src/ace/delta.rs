@@ -3,11 +3,11 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
-use tracing::{info, warn, debug};
 
 use crate::{
-    ace::playbook::{PlaybookDAO, PlaybookSection, PlaybookBullet},
+    ace::playbook::{PlaybookBullet, PlaybookDAO, PlaybookSection},
     embeddings::EmbeddingGemma,
 };
 
@@ -43,11 +43,7 @@ pub struct Delta {
 
 impl Delta {
     /// Create an Add delta
-    pub fn add(
-        section: PlaybookSection,
-        content: String,
-        meta: Option<serde_json::Value>,
-    ) -> Self {
+    pub fn add(section: PlaybookSection, content: String, meta: Option<serde_json::Value>) -> Self {
         Self {
             op: DeltaOp::Add,
             section,
@@ -130,10 +126,11 @@ impl Delta {
                 if self.bullet_id.is_none() {
                     return Err(anyhow::anyhow!("Update delta requires bullet_id"));
                 }
-                if self.content.is_none() 
-                    && self.helpful_delta.is_none() 
-                    && self.harmful_delta.is_none() 
-                    && self.confidence_adjustment.is_none() {
+                if self.content.is_none()
+                    && self.helpful_delta.is_none()
+                    && self.harmful_delta.is_none()
+                    && self.confidence_adjustment.is_none()
+                {
                     return Err(anyhow::anyhow!(
                         "Update delta requires at least one field to update"
                     ));
@@ -222,10 +219,7 @@ pub struct DeltaEngine {
 
 impl DeltaEngine {
     /// Create new delta engine
-    pub async fn new(
-        playbook_dao: PlaybookDAO,
-        config: Option<DeltaEngineConfig>,
-    ) -> Result<Self> {
+    pub async fn new(playbook_dao: PlaybookDAO, config: Option<DeltaEngineConfig>) -> Result<Self> {
         let embedder = EmbeddingGemma::load().await?;
         let config = config.unwrap_or_default();
 
@@ -247,7 +241,7 @@ impl DeltaEngine {
 
         for delta in deltas {
             let result = self.apply_single_delta(delta).await;
-            
+
             match &result.status {
                 DeltaStatus::Applied => applied_count += 1,
                 DeltaStatus::SkippedDuplicate | DeltaStatus::SkippedOther => skipped_count += 1,
@@ -295,11 +289,22 @@ impl DeltaEngine {
 
     /// Apply an Add delta with deduplication
     async fn apply_add_delta(&self, delta: Delta) -> DeltaResult {
-        let content = delta.content.as_ref().unwrap();
+        let Some(content) = delta.content.as_ref() else {
+            return DeltaResult {
+                delta,
+                status: DeltaStatus::Failed,
+                message: Some("Add operation requires content".to_string()),
+                bullet_id: None,
+                similarity_score: None,
+            };
+        };
 
         // Skip deduplication check for very short content
         if content.len() < self.config.min_content_length {
-            debug!("Skipping deduplication check for short content: {}", content);
+            debug!(
+                "Skipping deduplication check for short content: {}",
+                content
+            );
         } else {
             // Check for duplicates in the same section
             match self.check_for_duplicates(&delta.section, content).await {
@@ -331,14 +336,21 @@ impl DeltaEngine {
         }
 
         // Insert new bullet
-        match self.playbook_dao.insert_bullet(
-            delta.section.clone(),
-            content.clone(),
-            delta.meta.as_ref().and_then(|m| m.get("source_context_id"))
-                .and_then(|id| id.as_str())
-                .and_then(|id| Uuid::parse_str(id).ok()),
-            delta.meta.clone(),
-        ).await {
+        match self
+            .playbook_dao
+            .insert_bullet(
+                delta.section.clone(),
+                content.clone(),
+                delta
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("source_context_id"))
+                    .and_then(|id| id.as_str())
+                    .and_then(|id| Uuid::parse_str(id).ok()),
+                delta.meta.clone(),
+            )
+            .await
+        {
             Ok(bullet_id) => DeltaResult {
                 delta,
                 status: DeltaStatus::Applied,
@@ -358,11 +370,23 @@ impl DeltaEngine {
 
     /// Apply an Update delta
     async fn apply_update_delta(&self, delta: Delta) -> DeltaResult {
-        let bullet_id = delta.bullet_id.unwrap();
+        let Some(bullet_id) = delta.bullet_id else {
+            return DeltaResult {
+                delta,
+                status: DeltaStatus::Failed,
+                message: Some("Update operation requires bullet_id".to_string()),
+                bullet_id: None,
+                similarity_score: None,
+            };
+        };
 
         // Update content if provided
         if let Some(content) = &delta.content {
-            match self.playbook_dao.update_bullet_content(bullet_id, content.clone()).await {
+            match self
+                .playbook_dao
+                .update_bullet_content(bullet_id, content.clone())
+                .await
+            {
                 Ok(true) => {
                     return DeltaResult {
                         delta,
@@ -394,17 +418,24 @@ impl DeltaEngine {
         }
 
         // Update counters if provided
-        if delta.helpful_delta.is_some() || delta.harmful_delta.is_some() || delta.confidence_adjustment.is_some() {
+        if delta.helpful_delta.is_some()
+            || delta.harmful_delta.is_some()
+            || delta.confidence_adjustment.is_some()
+        {
             let helpful_delta = delta.helpful_delta.unwrap_or(0);
             let harmful_delta = delta.harmful_delta.unwrap_or(0);
             let confidence_adjustment = delta.confidence_adjustment.unwrap_or(0.0);
 
-            match self.playbook_dao.update_counters(
-                bullet_id,
-                helpful_delta,
-                harmful_delta,
-                confidence_adjustment,
-            ).await {
+            match self
+                .playbook_dao
+                .update_counters(
+                    bullet_id,
+                    helpful_delta,
+                    harmful_delta,
+                    confidence_adjustment,
+                )
+                .await
+            {
                 Ok(true) => DeltaResult {
                     delta,
                     status: DeltaStatus::Applied,
@@ -440,7 +471,15 @@ impl DeltaEngine {
 
     /// Apply a Remove delta
     async fn apply_remove_delta(&self, delta: Delta) -> DeltaResult {
-        let bullet_id = delta.bullet_id.unwrap();
+        let Some(bullet_id) = delta.bullet_id else {
+            return DeltaResult {
+                delta,
+                status: DeltaStatus::Failed,
+                message: Some("Remove operation requires bullet_id".to_string()),
+                bullet_id: None,
+                similarity_score: None,
+            };
+        };
 
         match self.playbook_dao.delete_bullet(bullet_id).await {
             Ok(true) => DeltaResult {
@@ -474,7 +513,8 @@ impl DeltaEngine {
         content: &str,
     ) -> Result<Option<(f32, PlaybookBullet)>> {
         // Get existing bullets in the same section
-        let existing_bullets = self.playbook_dao
+        let existing_bullets = self
+            .playbook_dao
             .get_by_section(section.clone(), Some(self.config.max_similarity_checks))
             .await
             .context("Failed to get existing bullets for deduplication")?;
@@ -484,7 +524,10 @@ impl DeltaEngine {
         }
 
         // Generate embedding for the new content
-        let new_embedding = self.embedder.embed(content).await
+        let new_embedding = self
+            .embedder
+            .embed(content)
+            .await
             .context("Failed to generate embedding for new content")?;
 
         // Check similarity against existing bullets
@@ -492,7 +535,10 @@ impl DeltaEngine {
 
         for bullet in existing_bullets {
             // Generate embedding for existing bullet content
-            let existing_embedding = self.embedder.embed(&bullet.content).await
+            let existing_embedding = self
+                .embedder
+                .embed(&bullet.content)
+                .await
                 .context("Failed to generate embedding for existing bullet")?;
 
             // Calculate cosine similarity
@@ -589,11 +635,7 @@ mod tests {
         assert!(invalid_update.validate().is_err());
 
         // Valid Remove delta
-        let remove_delta = Delta::remove(
-            Uuid::new_v4(),
-            PlaybookSection::RegimeRules,
-            None,
-        );
+        let remove_delta = Delta::remove(Uuid::new_v4(), PlaybookSection::RegimeRules, None);
         assert!(remove_delta.validate().is_ok());
     }
 
@@ -653,14 +695,8 @@ mod tests {
         assert!(update_content.helpful_delta.is_none());
 
         // Test Update counters delta
-        let update_counters = Delta::update_counters(
-            bullet_id,
-            PlaybookSection::RegimeRules,
-            2,
-            1,
-            0.05,
-            None,
-        );
+        let update_counters =
+            Delta::update_counters(bullet_id, PlaybookSection::RegimeRules, 2, 1, 0.05, None);
         assert_eq!(update_counters.op, DeltaOp::Update);
         assert_eq!(update_counters.bullet_id, Some(bullet_id));
         assert!(update_counters.content.is_none());
@@ -683,8 +719,9 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires TEST_DATABASE_URL and actual database setup
     async fn test_delta_engine_integration() {
-        let database_url = std::env::var("TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost/traderjoe_test".to_string());
+        let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost/traderjoe_test".to_string()
+        });
 
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
@@ -704,15 +741,14 @@ mod tests {
             .expect("Failed to create delta engine");
 
         // Test adding a new bullet
-        let deltas = vec![
-            Delta::add(
-                PlaybookSection::PatternInsights,
-                "High VIX usually leads to mean reversion within 3-5 days".to_string(),
-                Some(json!({"test": true})),
-            ),
-        ];
+        let deltas = vec![Delta::add(
+            PlaybookSection::PatternInsights,
+            "High VIX usually leads to mean reversion within 3-5 days".to_string(),
+            Some(json!({"test": true})),
+        )];
 
-        let report = engine.apply_deltas(deltas)
+        let report = engine
+            .apply_deltas(deltas)
             .await
             .expect("Failed to apply deltas");
 
@@ -721,21 +757,22 @@ mod tests {
         assert_eq!(report.failed_count, 0);
         assert!(report.success);
 
-        let bullet_id = report.delta_results[0].bullet_id.expect("Should have bullet ID");
+        let bullet_id = report.delta_results[0]
+            .bullet_id
+            .expect("Should have bullet ID");
 
         // Test updating the bullet
-        let update_deltas = vec![
-            Delta::update_counters(
-                bullet_id,
-                PlaybookSection::PatternInsights,
-                3,
-                1,
-                0.1,
-                None,
-            ),
-        ];
+        let update_deltas = vec![Delta::update_counters(
+            bullet_id,
+            PlaybookSection::PatternInsights,
+            3,
+            1,
+            0.1,
+            None,
+        )];
 
-        let update_report = engine.apply_deltas(update_deltas)
+        let update_report = engine
+            .apply_deltas(update_deltas)
             .await
             .expect("Failed to apply update deltas");
 
@@ -743,28 +780,33 @@ mod tests {
         assert!(update_report.success);
 
         // Test deduplication - add very similar content
-        let duplicate_deltas = vec![
-            Delta::add(
-                PlaybookSection::PatternInsights,
-                "High VIX typically leads to mean reversion in 3-5 trading days".to_string(),
-                None,
-            ),
-        ];
+        let duplicate_deltas = vec![Delta::add(
+            PlaybookSection::PatternInsights,
+            "High VIX typically leads to mean reversion in 3-5 trading days".to_string(),
+            None,
+        )];
 
-        let dup_report = engine.apply_deltas(duplicate_deltas)
+        let dup_report = engine
+            .apply_deltas(duplicate_deltas)
             .await
             .expect("Failed to apply duplicate deltas");
 
         assert_eq!(dup_report.skipped_count, 1);
-        assert_eq!(dup_report.delta_results[0].status, DeltaStatus::SkippedDuplicate);
+        assert_eq!(
+            dup_report.delta_results[0].status,
+            DeltaStatus::SkippedDuplicate
+        );
         assert!(dup_report.delta_results[0].similarity_score.unwrap() >= 0.90);
 
         // Test removing the bullet
-        let remove_deltas = vec![
-            Delta::remove(bullet_id, PlaybookSection::PatternInsights, None),
-        ];
+        let remove_deltas = vec![Delta::remove(
+            bullet_id,
+            PlaybookSection::PatternInsights,
+            None,
+        )];
 
-        let remove_report = engine.apply_deltas(remove_deltas)
+        let remove_report = engine
+            .apply_deltas(remove_deltas)
             .await
             .expect("Failed to apply remove deltas");
 

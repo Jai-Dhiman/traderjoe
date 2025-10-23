@@ -7,7 +7,7 @@ use serde_json::Value;
 /// Trading decision output format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingDecision {
-    pub action: String, // "BUY_CALLS", "BUY_PUTS", "STAY_FLAT"
+    pub action: String,  // "BUY_CALLS", "BUY_PUTS", "STAY_FLAT"
     pub confidence: f32, // 0.0 to 1.0
     pub reasoning: String,
     pub key_factors: Vec<String>,
@@ -66,7 +66,8 @@ impl ACEPrompts {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let playbook_text = playbook_entries.iter()
+        let playbook_text = playbook_entries
+            .iter()
             .enumerate()
             .map(|(i, entry)| format!("{}. {}", i + 1, entry))
             .collect::<Vec<_>>()
@@ -123,7 +124,11 @@ Focus on finding high-probability setups with favorable risk/reward rather than 
             serde_json::to_string_pretty(ml_signals).unwrap_or("No ML signals".to_string()),
             similar_contexts.len(),
             similar_contexts_text,
-            if playbook_entries.is_empty() { "No relevant playbook entries yet." } else { &playbook_text }
+            if playbook_entries.is_empty() {
+                "No relevant playbook entries yet."
+            } else {
+                &playbook_text
+            }
         )
     }
 
@@ -315,7 +320,7 @@ Focus on statistically meaningful patterns (at least 5 occurrences) and be speci
 mod tests {
     use super::*;
     use serde_json::json;
-    
+
     #[test]
     fn test_trading_decision_serialization() {
         let decision = TradingDecision {
@@ -327,34 +332,30 @@ mod tests {
             similar_pattern_reference: Some("Pattern from 2024-01-15".to_string()),
             position_size_multiplier: 0.8,
         };
-        
+
         let json = serde_json::to_string(&decision).expect("Failed to serialize");
-        let deserialized: TradingDecision = serde_json::from_str(&json).expect("Failed to deserialize");
-        
+        let deserialized: TradingDecision =
+            serde_json::from_str(&json).expect("Failed to deserialize");
+
         assert_eq!(decision.action, deserialized.action);
         assert_eq!(decision.confidence, deserialized.confidence);
     }
-    
+
     #[test]
     fn test_prompt_generation() {
         let market_state = json!({
             "spy_price": 450.0,
             "vix": 15.0
         });
-        
+
         let ml_signals = json!({
             "technical_score": 0.7,
             "sentiment_score": 0.6
         });
-        
-        let prompt = ACEPrompts::morning_decision_prompt(
-            &market_state,
-            &ml_signals,
-            &[],
-            &[],
-            "2025-01-15"
-        );
-        
+
+        let prompt =
+            ACEPrompts::morning_decision_prompt(&market_state, &ml_signals, &[], &[], "2025-01-15");
+
         assert!(prompt.contains("CURRENT DATE: 2025-01-15"));
         assert!(prompt.contains("spy_price"));
         assert!(prompt.contains("BUY_CALLS"));

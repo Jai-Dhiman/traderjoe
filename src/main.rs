@@ -4,16 +4,9 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod cli;
-mod config;
-mod data;
-mod db;
-mod embeddings;
-mod vector;
-mod ace;
-mod llm;
-mod trading;
-mod orchestrator;
-mod ml;
+
+// Import from library
+use traderjoe::{config, data, db, embeddings, vector, ace, llm, trading, orchestrator, ml, system};
 
 use cli::Cli;
 use config::Config;

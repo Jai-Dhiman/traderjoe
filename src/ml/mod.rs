@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 pub trait Predictor {
     type Input;
     type Output;
-    
+
     fn predict(&self, input: &Self::Input) -> Result<Self::Output, Box<dyn std::error::Error>>;
 }
 

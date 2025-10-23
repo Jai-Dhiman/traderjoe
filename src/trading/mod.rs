@@ -1,46 +1,18 @@
 // Paper trading and risk management module
-// TODO: Implement trading components:
-// - Paper trading engine with realistic slippage
-// - Position management and tracking
-// - Risk checks and circuit breakers
+// Phase 4: Fully implemented paper trading system
 
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use chrono::{DateTime, Utc};
+pub mod account;
+pub mod auto_exit;
+pub mod circuit_breaker;
+pub mod execution;
+pub mod paper;
+pub mod position_sizing;
 
-// TODO: Add trading modules when implemented
-// pub mod paper;
-// pub mod risk;
-// pub mod positions;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaperTradingEngine {
-    // TODO: Add trading engine fields
-}
-
-impl PaperTradingEngine {
-    pub async fn new() -> Result<Self> {
-        // TODO: Initialize paper trading
-        todo!("Paper trading engine not yet implemented")
-    }
-    
-    pub async fn execute_trade(
-        &self,
-        recommendation: &crate::ace::TradingRecommendation,
-    ) -> Result<TradeResult> {
-        // TODO: Execute paper trade with slippage
-        todo!("Trade execution not yet implemented")
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TradeResult {
-    pub id: Uuid,
-    pub symbol: String,
-    pub action: String,
-    pub quantity: f64,
-    pub entry_price: f64,
-    pub timestamp: DateTime<Utc>,
-    pub pnl: Option<f64>,
-}
+// Re-export commonly used types
+pub use account::AccountManager;
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+pub use execution::{
+    ExecutionParams, OrderSide,
+};
+pub use paper::{PaperTradingEngine, TradeType};
+pub use position_sizing::PositionSizer;

@@ -1,23 +1,20 @@
 //! Evening review orchestrator
 //! Processes trading outcomes and updates ACE playbook through reflection
 
-use anyhow::{Result, Context as AnyhowContext};
+use anyhow::{Context as AnyhowContext, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::{
+    ace::{
+        playbook::PlaybookDAO, reflector::TradingOutcome, ContextDAO, CurationSummary, Curator,
+        TradingDecision,
+    },
     config::Config,
     data::MarketDataClient,
-    ace::{
-        ContextDAO,
-        TradingDecision,
-        Curator, CuratorConfig, CurationSummary,
-        playbook::PlaybookDAO,
-        reflector::TradingOutcome,
-    },
     llm::LLMClient,
     trading::PaperTradingEngine,
 };
@@ -41,16 +38,30 @@ impl EveningReviewResult {
     /// Display human-readable summary of the review
     pub fn display_summary(&self) {
         println!("\n╔════════════════════════════════════════════════════════════╗");
-        println!("║          EVENING REVIEW - {}           ║",
-                 Utc::now().format("%Y-%m-%d"));
+        println!(
+            "║          EVENING REVIEW - {}           ║",
+            Utc::now().format("%Y-%m-%d")
+        );
         println!("╚════════════════════════════════════════════════════════════╝\n");
 
         println!("📊 TRADE OUTCOME:");
         println!("   Context ID: {}", self.context_id);
-        println!("   Result: {}", if self.outcome.win { "✅ WIN" } else { "❌ LOSS" });
-        println!("   P&L: ${:.2} ({:+.2}%)", self.outcome.pnl_value, self.outcome.pnl_pct);
-        println!("   Entry: ${:.2} → Exit: ${:.2}",
-                 self.outcome.entry_price, self.outcome.exit_price);
+        println!(
+            "   Result: {}",
+            if self.outcome.win {
+                "✅ WIN"
+            } else {
+                "❌ LOSS"
+            }
+        );
+        println!(
+            "   P&L: ${:.2} ({:+.2}%)",
+            self.outcome.pnl_value, self.outcome.pnl_pct
+        );
+        println!(
+            "   Entry: ${:.2} → Exit: ${:.2}",
+            self.outcome.entry_price, self.outcome.exit_price
+        );
         println!("   Duration: {:.1} hours", self.outcome.duration_hours);
 
         if let Some(mfe) = self.outcome.mfe {
@@ -103,7 +114,8 @@ impl EveningOrchestrator {
             llm_client,
             None, // Use default curator config
             None, // Use default delta engine config
-        ).await?;
+        )
+        .await?;
 
         let paper_trading = PaperTradingEngine::new(pool.clone());
 
@@ -125,15 +137,16 @@ impl EveningOrchestrator {
         info!("🌙 Starting evening review for latest context");
 
         // Get the most recent context that hasn't been reviewed yet
-        let context = self.context_dao.get_latest_without_outcome().await
-            .context("Failed to get latest context without outcome")?;
+        let context = self
+            .context_dao
+            .get_latest_without_outcome()
+            .await
+            .context("Failed to get latest context without outcome")?
+            .ok_or_else(|| {
+                warn!("No unreviewed contexts found");
+                anyhow::anyhow!("No contexts available for review")
+            })?;
 
-        if context.is_none() {
-            warn!("No unreviewed contexts found");
-            anyhow::bail!("No contexts available for review");
-        }
-
-        let context = context.unwrap();
         info!("Found context {} from {}", context.id, context.timestamp);
 
         self.review_context(context.id).await
@@ -144,7 +157,10 @@ impl EveningOrchestrator {
         info!("🌙 Starting evening review for context {}", context_id);
 
         // Step 1: Get the original context
-        let context = self.context_dao.get_by_id(context_id).await
+        let context = self
+            .context_dao
+            .get_by_id(context_id)
+            .await
             .context("Failed to get context")?
             .ok_or_else(|| anyhow::anyhow!("Context {} not found", context_id))?;
 
@@ -157,24 +173,32 @@ impl EveningOrchestrator {
         info!("📊 Computing trading outcome...");
         let outcome = self.compute_outcome(&context, &decision).await?;
 
-        info!("Outcome: {} with P&L ${:.2} ({:+.2}%)",
-              if outcome.win { "WIN" } else { "LOSS" },
-              outcome.pnl_value,
-              outcome.pnl_pct);
+        info!(
+            "Outcome: {} with P&L ${:.2} ({:+.2}%)",
+            if outcome.win { "WIN" } else { "LOSS" },
+            outcome.pnl_value,
+            outcome.pnl_pct
+        );
 
         // Step 4: Run reflection and update playbook
         info!("🧠 Running ACE reflection...");
-        let curation_summary = self.curator.reflect_and_update_playbook(
-            decision.clone(),
-            context.market_state.clone(),
-            outcome.clone(),
-            context_id,
-        ).await.context("Failed to reflect and update playbook")?;
+        let curation_summary = self
+            .curator
+            .reflect_and_update_playbook(
+                decision.clone(),
+                context.market_state.clone(),
+                outcome.clone(),
+                context_id,
+            )
+            .await
+            .context("Failed to reflect and update playbook")?;
 
-        info!("Playbook updated: {} added, {} updated, {} removed",
-              curation_summary.bullets_added,
-              curation_summary.bullets_updated,
-              curation_summary.bullets_removed);
+        info!(
+            "Playbook updated: {} added, {} updated, {} removed",
+            curation_summary.bullets_added,
+            curation_summary.bullets_updated,
+            curation_summary.bullets_removed
+        );
 
         // Step 5: Update context with outcome
         let outcome_json = json!({
@@ -190,7 +214,9 @@ impl EveningOrchestrator {
             "reviewed_at": Utc::now().to_rfc3339(),
         });
 
-        self.context_dao.update_outcome(context_id, &outcome_json).await
+        self.context_dao
+            .update_outcome(context_id, &outcome_json)
+            .await
             .context("Failed to update context outcome")?;
 
         info!("✅ Evening review completed successfully");
@@ -208,10 +234,16 @@ impl EveningOrchestrator {
     pub async fn review_all_pending(&self) -> Result<Vec<EveningReviewResult>> {
         info!("🌙 Starting batch evening review for all pending contexts");
 
-        let pending_contexts = self.context_dao.get_all_without_outcome().await
+        let pending_contexts = self
+            .context_dao
+            .get_all_without_outcome()
+            .await
             .context("Failed to get pending contexts")?;
 
-        info!("Found {} pending contexts to review", pending_contexts.len());
+        info!(
+            "Found {} pending contexts to review",
+            pending_contexts.len()
+        );
 
         let mut results = Vec::new();
 
@@ -237,29 +269,42 @@ impl EveningOrchestrator {
             }
         }
 
-        info!("✅ Batch review completed: {} contexts processed", results.len());
+        info!(
+            "✅ Batch review completed: {} contexts processed",
+            results.len()
+        );
 
         Ok(results)
     }
 
     /// Parse trading decision from context
-    fn parse_decision_from_context(&self, context: &crate::ace::context::AceContext) -> Result<TradingDecision> {
+    fn parse_decision_from_context(
+        &self,
+        context: &crate::ace::context::AceContext,
+    ) -> Result<TradingDecision> {
         // The decision is stored in the context's decision field
-        let decision = &context.decision;
+        let decision = context
+            .decision
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Context has no decision"))?;
 
         Ok(TradingDecision {
-            action: decision.get("action")
+            action: decision
+                .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or("STAY_FLAT")
                 .to_string(),
-            confidence: decision.get("confidence")
+            confidence: decision
+                .get("confidence")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.5) as f32,
-            reasoning: decision.get("reasoning")
+            reasoning: decision
+                .get("reasoning")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            key_factors: decision.get("key_factors")
+            key_factors: decision
+                .get("key_factors")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -268,7 +313,8 @@ impl EveningOrchestrator {
                         .collect()
                 })
                 .unwrap_or_default(),
-            risk_factors: decision.get("risk_factors")
+            risk_factors: decision
+                .get("risk_factors")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -277,10 +323,12 @@ impl EveningOrchestrator {
                         .collect()
                 })
                 .unwrap_or_default(),
-            similar_pattern_reference: decision.get("similar_pattern_reference")
+            similar_pattern_reference: decision
+                .get("similar_pattern_reference")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            position_size_multiplier: decision.get("position_size_multiplier")
+            position_size_multiplier: decision
+                .get("position_size_multiplier")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(1.0) as f32,
         })
@@ -293,12 +341,15 @@ impl EveningOrchestrator {
         decision: &TradingDecision,
     ) -> Result<TradingOutcome> {
         // Extract symbol from market state
-        let symbol = context.market_state.get("symbol")
+        let symbol = context
+            .market_state
+            .get("symbol")
             .and_then(|v| v.as_str())
             .unwrap_or("SPY");
 
         // Get entry price (from context timestamp)
-        let entry_price = context.market_state
+        let entry_price = context
+            .market_state
             .get("market_data")
             .and_then(|md| md.get("close"))
             .and_then(|c| c.as_f64())
@@ -306,10 +357,14 @@ impl EveningOrchestrator {
 
         // Get current/exit price
         info!("Fetching current price for {} to compute outcome", symbol);
-        let current_data = self.market_client.fetch_latest(symbol).await
+        let current_data = self
+            .market_client
+            .fetch_latest(symbol)
+            .await
             .context("Failed to fetch current market data")?;
 
-        let exit_price = current_data.get("close")
+        let exit_price = current_data
+            .get("close")
             .and_then(|c| c.as_f64())
             .ok_or_else(|| anyhow::anyhow!("Missing close price in current data"))?;
 
@@ -340,7 +395,10 @@ impl EveningOrchestrator {
         let win = pnl_value > 0.0;
 
         // Try to get MFE/MAE from paper trading engine if available
-        let (mfe, mae) = self.get_excursions(context.id).await.unwrap_or((None, None));
+        let (mfe, mae) = self
+            .get_excursions(context.id)
+            .await
+            .unwrap_or((None, None));
 
         let notes = if decision.action == "STAY_FLAT" {
             Some("No trade taken (stayed flat)".to_string())
@@ -365,7 +423,10 @@ impl EveningOrchestrator {
     async fn get_excursions(&self, context_id: Uuid) -> Result<(Option<f64>, Option<f64>)> {
         // This would query the paper trading engine for tracked excursions
         // For now, return None - can be enhanced later
-        debug!("Excursion tracking not yet implemented for context {}", context_id);
+        debug!(
+            "Excursion tracking not yet implemented for context {}",
+            context_id
+        );
         Ok((None, None))
     }
 
@@ -409,8 +470,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Integration test - requires database setup"]
     async fn test_parse_decision_from_context() {
-        // This would require setting up test context
-        // Placeholder for integration testing
+        // TODO: Implement integration test with database fixture
+        // This would test parsing trading decisions from ACE contexts
     }
 }

@@ -1,13 +1,18 @@
-//! LLM integration module for Ollama + cloud fallback
-//! Provides local Llama 3.2 3B integration with explicit error handling
+//! LLM integration module for Ollama + OpenAI fallback
+//! Provides local Llama 3.2 3B integration with OpenAI GPT-4o-mini fallback
 
 use anyhow::{Context, Result};
+use async_openai::{Client as OpenAIClient, config::OpenAIConfig, types::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage, CreateChatCompletionRequest}};
 use ollama_rs::{Ollama, generation::completion::request::GenerationRequest};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Instant};
 use tracing::{info, warn, error};
 use url::Url;
+
+use crate::system;
 
 /// LLM response with metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,8 +29,11 @@ pub struct LLMResponse {
 pub struct LLMConfig {
     pub ollama_url: String,
     pub primary_model: String,
+    pub fallback_model: String,  // OpenAI model (e.g., "gpt-4o-mini")
+    pub openai_api_key: Option<String>,
     pub timeout_seconds: u64,
     pub max_retries: u32,
+    pub enable_fallback: bool,
 }
 
 impl Default for LLMConfig {
@@ -33,17 +41,78 @@ impl Default for LLMConfig {
         Self {
             ollama_url: "http://localhost:11434".to_string(),
             primary_model: "llama3.2:3b".to_string(),
+            fallback_model: "gpt-4o-mini".to_string(),
+            openai_api_key: None,
             timeout_seconds: 30,
             max_retries: 3,
+            enable_fallback: true,
         }
     }
 }
 
-/// LLM client with local Ollama integration
-#[derive(Debug, Clone)]
+/// Rate limiter for OpenAI API calls (60 requests per minute)
+#[derive(Debug)]
+struct RateLimiter {
+    requests: Arc<Mutex<Vec<Instant>>>,
+    max_requests_per_minute: usize,
+}
+
+impl RateLimiter {
+    fn new(max_requests_per_minute: usize) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            max_requests_per_minute,
+        }
+    }
+
+    async fn acquire(&self) -> Result<()> {
+        loop {
+            let mut requests = self.requests.lock().await;
+            let now = Instant::now();
+            let one_minute_ago = now - Duration::from_secs(60);
+
+            // Remove requests older than 1 minute
+            requests.retain(|&time| time > one_minute_ago);
+
+            if requests.len() >= self.max_requests_per_minute {
+                let Some(oldest) = requests.first() else {
+                    // This should never happen since we just checked len >= max_requests_per_minute
+                    // But we handle it gracefully just in case
+                    drop(requests);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                };
+                let wait_duration = Duration::from_secs(60) - (now - *oldest);
+                drop(requests); // Release lock before sleeping
+
+                warn!("Rate limit reached. Waiting {:?} before next request", wait_duration);
+                tokio::time::sleep(wait_duration).await;
+                continue; // Loop instead of recursive call
+            }
+
+            requests.push(now);
+            return Ok(());
+        }
+    }
+}
+
+/// LLM client with local Ollama integration and OpenAI fallback
+#[derive(Clone)]
 pub struct LLMClient {
     ollama: Ollama,
+    openai_client: Option<OpenAIClient<OpenAIConfig>>,
     config: LLMConfig,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    fallback_usage_count: Arc<Mutex<usize>>,
+}
+
+impl std::fmt::Debug for LLMClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMClient")
+            .field("config", &self.config)
+            .field("has_openai_client", &self.openai_client.is_some())
+            .finish()
+    }
 }
 
 impl LLMClient {
@@ -53,29 +122,62 @@ impl LLMClient {
         let url = config.ollama_url.clone();
         let parsed_url = Url::parse(&url)
             .context("Invalid Ollama URL")?;
-        
+
         let host = parsed_url.host_str()
             .ok_or_else(|| anyhow::anyhow!("No host in Ollama URL"))?;
         let port = parsed_url.port().unwrap_or(11434);
-        
+
         let ollama = Ollama::new(host.to_string(), port);
-        
-        // Test connectivity
+
+        // Initialize OpenAI client if API key is provided
+        let (openai_client, rate_limiter) = if config.enable_fallback {
+            if let Some(api_key) = config.openai_api_key.as_ref() {
+                info!("Initializing OpenAI fallback with model: {}", config.fallback_model);
+                let openai_config = OpenAIConfig::new()
+                    .with_api_key(api_key);
+                let client = OpenAIClient::with_config(openai_config);
+                let limiter = Arc::new(RateLimiter::new(60)); // 60 requests per minute
+                (Some(client), Some(limiter))
+            } else {
+                warn!("OpenAI fallback enabled but no API key provided");
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        // Check available memory before proceeding
+        info!("Checking system memory before model initialization");
+        match system::check_available_memory() {
+            Ok(mem_stats) => {
+                info!(
+                    "Memory check passed: {:.2} GB available / {:.2} GB total",
+                    mem_stats.available_memory_gb,
+                    mem_stats.total_memory_gb
+                );
+            }
+            Err(e) => {
+                error!("Memory check failed: {}", e);
+                return Err(e);
+            }
+        }
+
+        // Test Ollama connectivity
         info!("Testing Ollama connectivity at {}", config.ollama_url);
-        
+
         // Try to list models to verify connection
         match timeout(
             Duration::from_secs(10),
             ollama.list_local_models()
         ).await {
             Ok(Ok(models)) => {
-                info!("Connected to Ollama successfully. Available models: {:?}", 
+                info!("Connected to Ollama successfully. Available models: {:?}",
                      models.iter().map(|m| &m.name).collect::<Vec<_>>());
-                
+
                 // Check if primary model is available
                 let model_available = models.iter()
                     .any(|m| m.name.contains(&config.primary_model));
-                
+
                 if !model_available {
                     warn!(
                         "Primary model '{}' not found in available models. Consider pulling it with: ollama pull {}",
@@ -85,19 +187,33 @@ impl LLMClient {
             }
             Ok(Err(e)) => {
                 error!("Failed to list Ollama models: {}", e);
-                return Err(anyhow::anyhow!(
-                    "Ollama API error when listing models: {}. Is Ollama running?", e
-                ));
+                if openai_client.is_none() {
+                    return Err(anyhow::anyhow!(
+                        "Ollama API error when listing models: {}. Is Ollama running? No fallback available.", e
+                    ));
+                } else {
+                    warn!("Ollama unavailable but fallback is configured: {}", e);
+                }
             }
             Err(_) => {
                 error!("Timeout connecting to Ollama at {}", config.ollama_url);
-                return Err(anyhow::anyhow!(
-                    "Timeout connecting to Ollama. Is Ollama running at {}?", config.ollama_url
-                ));
+                if openai_client.is_none() {
+                    return Err(anyhow::anyhow!(
+                        "Timeout connecting to Ollama. Is Ollama running at {}? No fallback available.", config.ollama_url
+                    ));
+                } else {
+                    warn!("Ollama timeout but fallback is configured");
+                }
             }
         }
-        
-        Ok(Self { ollama, config })
+
+        Ok(Self {
+            ollama,
+            openai_client,
+            config,
+            rate_limiter,
+            fallback_usage_count: Arc::new(Mutex::new(0)),
+        })
     }
     
     /// Create client from config::Config
@@ -105,27 +221,95 @@ impl LLMClient {
         let llm_config = LLMConfig {
             ollama_url: config.llm.ollama_url.clone(),
             primary_model: config.llm.primary_model.clone(),
+            fallback_model: config.llm.fallback_model.clone(),
+            openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             timeout_seconds: config.llm.timeout_seconds,
             max_retries: 3,
+            enable_fallback: true,
         };
-        
+
         Self::new(llm_config).await
     }
+
+    /// Get fallback usage statistics
+    pub async fn fallback_usage_count(&self) -> usize {
+        *self.fallback_usage_count.lock().await
+    }
+
+    /// Generate text using OpenAI (fallback)
+    async fn generate_with_openai(&self, prompt: &str) -> Result<LLMResponse> {
+        let client = self.openai_client.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("OpenAI client not initialized"))?;
+
+        let limiter = self.rate_limiter.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Rate limiter not initialized"))?;
+
+        // Acquire rate limit slot
+        limiter.acquire().await?;
+
+        // Increment fallback usage counter
+        {
+            let mut count = self.fallback_usage_count.lock().await;
+            *count += 1;
+        }
+
+        info!("Using OpenAI fallback with model: {}", self.config.fallback_model);
+
+        let request = CreateChatCompletionRequest{
+            model: self.config.fallback_model.clone(),
+            messages: vec![
+                ChatCompletionRequestMessage::System(
+                    ChatCompletionRequestSystemMessage {
+                        content: async_openai::types::ChatCompletionRequestSystemMessageContent::Text(
+                            "You are a helpful assistant that provides concise, accurate responses.".to_string()
+                        ),
+                        ..Default::default()
+                    }
+                ),
+                ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(prompt.to_string()),
+                        ..Default::default()
+                    }
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let response = timeout(
+            Duration::from_secs(self.config.timeout_seconds),
+            client.chat().create(request)
+        ).await
+        .context("OpenAI request timeout")??;
+
+        let content = response.choices.first()
+            .and_then(|choice| choice.message.content.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("No content in OpenAI response"))?
+            .to_string();
+
+        Ok(LLMResponse {
+            content,
+            model: self.config.fallback_model.clone(),
+            prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens as usize),
+            completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens as usize),
+            total_tokens: response.usage.as_ref().map(|u| u.total_tokens as usize),
+        })
+    }
     
-    /// Generate text using specified model with explicit error handling
+    /// Generate text using specified model with explicit error handling and fallback
     pub async fn generate(
         &self,
         prompt: &str,
         model: Option<&str>,
     ) -> Result<LLMResponse> {
         let model_name = model.unwrap_or(&self.config.primary_model);
-        
-        info!("Generating text with model '{}' (prompt length: {} chars)", 
+
+        info!("Generating text with model '{}' (prompt length: {} chars)",
               model_name, prompt.len());
-        
+
         let request = GenerationRequest::new(model_name.to_string(), prompt.to_string());
-        
-        // Retry logic with exponential backoff
+
+        // Retry logic with exponential backoff for Ollama
         let mut last_error = None;
         for attempt in 1..=self.config.max_retries {
             match timeout(
@@ -133,9 +317,9 @@ impl LLMClient {
                 self.ollama.generate(request.clone())
             ).await {
                 Ok(Ok(response)) => {
-                    info!("Generated {} tokens with model '{}'", 
+                    info!("Generated {} chars with model '{}'",
                           response.response.len(), model_name);
-                    
+
                     return Ok(LLMResponse {
                         content: response.response,
                         model: model_name.to_string(),
@@ -149,23 +333,41 @@ impl LLMClient {
                     last_error = Some(anyhow::anyhow!("Ollama API error: {}", e));
                 }
                 Err(_) => {
-                    error!("Timeout on attempt {} after {} seconds", 
+                    error!("Timeout on attempt {} after {} seconds",
                            attempt, self.config.timeout_seconds);
                     last_error = Some(anyhow::anyhow!(
                         "Request timeout after {} seconds", self.config.timeout_seconds
                     ));
                 }
             }
-            
+
             if attempt < self.config.max_retries {
                 let backoff_seconds = 2_u64.pow(attempt - 1);
-                warn!("Retrying in {} seconds (attempt {}/{})", 
+                warn!("Retrying in {} seconds (attempt {}/{})",
                       backoff_seconds, attempt, self.config.max_retries);
                 tokio::time::sleep(Duration::from_secs(backoff_seconds)).await;
             }
         }
-        
-        Err(last_error.unwrap_or_else(|| 
+
+        // Ollama failed after all retries - try OpenAI fallback if available
+        if self.config.enable_fallback && self.openai_client.is_some() {
+            warn!("Ollama failed after {} attempts. Falling back to OpenAI", self.config.max_retries);
+            match self.generate_with_openai(prompt).await {
+                Ok(response) => {
+                    info!("Successfully generated response using OpenAI fallback");
+                    return Ok(response);
+                }
+                Err(e) => {
+                    error!("OpenAI fallback also failed: {}", e);
+                    return Err(anyhow::anyhow!(
+                        "Both Ollama and OpenAI fallback failed. Ollama: {:?}, OpenAI: {}",
+                        last_error, e
+                    ));
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(||
             anyhow::anyhow!("Failed to generate text after {} attempts", self.config.max_retries)
         ))
     }
@@ -219,8 +421,29 @@ Please respond with valid JSON only. Do not include any explanation or markdown 
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let models = self.ollama.list_local_models().await
             .context("Failed to list local models")?;
-        
+
         Ok(models.into_iter().map(|m| m.name).collect())
+    }
+
+    /// Get Ollama process memory usage
+    pub fn get_ollama_memory_usage(&self) -> Option<f64> {
+        let mut monitor = system::SystemMonitor::new();
+        monitor.get_ollama_memory_usage()
+    }
+
+    /// Log memory stats including Ollama usage
+    pub fn log_memory_stats(&self) -> Result<()> {
+        let mut monitor = system::SystemMonitor::new();
+        let stats = monitor.get_system_stats()?;
+
+        if let Some(ollama_mem_gb) = self.get_ollama_memory_usage() {
+            info!("Ollama process is using {:.2} GB of memory", ollama_mem_gb);
+        } else {
+            warn!("Could not find Ollama process to check memory usage");
+        }
+
+        info!("System stats: {}", serde_json::to_string_pretty(&stats)?);
+        Ok(())
     }
 }
 

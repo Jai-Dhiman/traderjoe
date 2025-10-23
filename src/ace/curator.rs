@@ -3,16 +3,16 @@
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use tracing::{info, warn, debug};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{
     ace::{
-        delta::{Delta, DeltaEngine, ApplyReport, DeltaEngineConfig},
-        playbook::{PlaybookDAO, PlaybookBullet, PlaybookSection, PlaybookStats},
+        delta::{ApplyReport, Delta, DeltaEngine, DeltaEngineConfig},
         generator::{Generator, GeneratorInput},
-        reflector::{Reflector, ReflectionInput, TradingOutcome},
+        playbook::{PlaybookDAO, PlaybookSection, PlaybookStats},
         prompts::TradingDecision,
+        reflector::{ReflectionInput, Reflector, TradingOutcome},
     },
     llm::LLMClient,
     vector::ContextEntry,
@@ -106,30 +106,45 @@ impl CurationSummary {
         println!("  • {} bullets added", self.bullets_added);
         println!("  • {} bullets updated", self.bullets_updated);
         println!("  • {} bullets removed", self.bullets_removed);
-        
+
         if self.total_helpful_delta != 0 || self.total_harmful_delta != 0 {
             println!("  • Helpful votes: {:+}", self.total_helpful_delta);
             println!("  • Harmful votes: {:+}", self.total_harmful_delta);
         }
-        
+
         if self.confidence_adjustments > 0 {
-            println!("  • {} confidence adjustments (avg: {:+.3})", 
-                     self.confidence_adjustments, self.avg_confidence_change);
+            println!(
+                "  • {} confidence adjustments (avg: {:+.3})",
+                self.confidence_adjustments, self.avg_confidence_change
+            );
         }
-        
+
         println!("📊 Before → After:");
-        println!("  • Total bullets: {} → {}", 
-                 self.stats_before.total_bullets, self.stats_after.total_bullets);
-        println!("  • High confidence: {} → {}", 
-                 self.stats_before.high_confidence_bullets, self.stats_after.high_confidence_bullets);
-        
-        if let (Some(before), Some(after)) = (self.stats_before.avg_confidence, self.stats_after.avg_confidence) {
-            println!("  • Avg confidence: {:.1}% → {:.1}%", 
-                     before * 100.0, after * 100.0);
+        println!(
+            "  • Total bullets: {} → {}",
+            self.stats_before.total_bullets, self.stats_after.total_bullets
+        );
+        println!(
+            "  • High confidence: {} → {}",
+            self.stats_before.high_confidence_bullets, self.stats_after.high_confidence_bullets
+        );
+
+        if let (Some(before), Some(after)) = (
+            self.stats_before.avg_confidence,
+            self.stats_after.avg_confidence,
+        ) {
+            println!(
+                "  • Avg confidence: {:.1}% → {:.1}%",
+                before * 100.0,
+                after * 100.0
+            );
         }
-        
-        println!("  • Usage rate: {:.1}% → {:.1}%", 
-                 self.stats_before.usage_percentage(), self.stats_after.usage_percentage());
+
+        println!(
+            "  • Usage rate: {:.1}% → {:.1}%",
+            self.stats_before.usage_percentage(),
+            self.stats_after.usage_percentage()
+        );
     }
 }
 
@@ -151,14 +166,14 @@ impl Curator {
         delta_config: Option<DeltaEngineConfig>,
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
-        
+
         // Create delta engine
         let delta_engine = DeltaEngine::new(playbook_dao.clone(), delta_config).await?;
-        
+
         // Create generator and reflector
         let generator = Generator::new(llm_client.clone());
         let reflector = Reflector::new(llm_client);
-        
+
         Ok(Self {
             playbook_dao,
             delta_engine,
@@ -179,7 +194,8 @@ impl Curator {
         info!("Starting pattern generation and application");
 
         // Get existing playbook for context
-        let existing_playbook = self.playbook_dao
+        let existing_playbook = self
+            .playbook_dao
             .get_recent_bullets(7, self.config.max_context_bullets)
             .await
             .context("Failed to get existing playbook for context")?;
@@ -194,7 +210,10 @@ impl Curator {
         };
 
         // Generate patterns
-        let deltas = self.generator.generate_patterns(generator_input).await
+        let deltas = self
+            .generator
+            .generate_patterns(generator_input)
+            .await
             .context("Failed to generate patterns")?;
 
         if deltas.is_empty() {
@@ -209,7 +228,9 @@ impl Curator {
         }
 
         // Apply generated deltas
-        self.delta_engine.apply_deltas(deltas).await
+        self.delta_engine
+            .apply_deltas(deltas)
+            .await
             .context("Failed to apply generated deltas")
     }
 
@@ -227,17 +248,20 @@ impl Curator {
         let stats_before = self.playbook_dao.get_stats().await?;
 
         // Identify which bullets were referenced in the decision
-        let available_bullets = self.playbook_dao
+        let available_bullets = self
+            .playbook_dao
             .get_recent_bullets(30, 100)
             .await
             .context("Failed to get bullets for reference identification")?;
-        
-        let referenced_bullets = self.reflector.identify_referenced_bullets(
-            &decision.reasoning,
-            &available_bullets,
-        );
 
-        info!("Identified {} referenced bullets in decision", referenced_bullets.len());
+        let referenced_bullets = self
+            .reflector
+            .identify_referenced_bullets(&decision.reasoning, &available_bullets);
+
+        info!(
+            "Identified {} referenced bullets in decision",
+            referenced_bullets.len()
+        );
 
         // Update last_used timestamps for referenced bullets
         if self.config.auto_update_usage {
@@ -257,7 +281,10 @@ impl Curator {
         };
 
         // Generate reflection deltas
-        let deltas = self.reflector.reflect_on_outcome(reflection_input).await
+        let deltas = self
+            .reflector
+            .reflect_on_outcome(reflection_input)
+            .await
             .context("Failed to generate reflection deltas")?;
 
         if deltas.is_empty() {
@@ -267,7 +294,10 @@ impl Curator {
         }
 
         // Apply reflection deltas
-        let apply_report = self.delta_engine.apply_deltas(deltas).await
+        let apply_report = self
+            .delta_engine
+            .apply_deltas(deltas)
+            .await
             .context("Failed to apply reflection deltas")?;
 
         // Get stats after changes
@@ -279,17 +309,20 @@ impl Curator {
     /// Get recent playbook entries for morning context generation
     pub async fn summarize_recent_playbook(&self, limit: usize) -> Result<Vec<String>> {
         // Get high-confidence pattern insights
-        let pattern_insights = self.playbook_dao
+        let pattern_insights = self
+            .playbook_dao
             .get_by_section(PlaybookSection::PatternInsights, Some(limit / 3))
             .await?;
 
         // Get recent failure modes as cautions
-        let failure_modes = self.playbook_dao
+        let failure_modes = self
+            .playbook_dao
             .get_by_section(PlaybookSection::FailureModes, Some(limit / 3))
             .await?;
 
         // Get regime rules for current conditions
-        let regime_rules = self.playbook_dao
+        let regime_rules = self
+            .playbook_dao
             .get_by_section(PlaybookSection::RegimeRules, Some(limit / 3))
             .await?;
 
@@ -319,7 +352,10 @@ impl Curator {
         // Sort by confidence descending, but keep limit
         summaries.truncate(limit);
 
-        info!("Generated {} playbook summaries for context", summaries.len());
+        info!(
+            "Generated {} playbook summaries for context",
+            summaries.len()
+        );
         Ok(summaries)
     }
 
@@ -327,9 +363,10 @@ impl Curator {
     pub async fn get_playbook_health(&self) -> Result<serde_json::Value> {
         let stats = self.playbook_dao.get_stats().await?;
         let section_counts = self.playbook_dao.get_section_counts().await?;
-        
+
         // Get stale bullets count
-        let stale_bullets = self.playbook_dao
+        let stale_bullets = self
+            .playbook_dao
             .get_stale_bullets(self.config.staleness_threshold_days)
             .await?;
 
@@ -351,10 +388,7 @@ impl Curator {
     }
 
     /// Apply batch of deltas with comprehensive reporting
-    pub async fn apply_deltas_with_summary(
-        &self,
-        deltas: Vec<Delta>,
-    ) -> Result<CurationSummary> {
+    pub async fn apply_deltas_with_summary(&self, deltas: Vec<Delta>) -> Result<CurationSummary> {
         let stats_before = self.playbook_dao.get_stats().await?;
 
         let apply_report = self.delta_engine.apply_deltas(deltas).await?;
@@ -417,13 +451,13 @@ impl Curator {
 
         for report in reports {
             bullets_added += report.applied_count;
-            
+
             for result in report.delta_results {
                 match result.delta.op {
                     crate::ace::delta::DeltaOp::Add => bullets_added += 1,
                     crate::ace::delta::DeltaOp::Update => {
                         bullets_updated += 1;
-                        
+
                         if let Some(helpful) = result.delta.helpful_delta {
                             total_helpful_delta += helpful;
                         }
@@ -463,7 +497,7 @@ impl Curator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{llm::LLMConfig, ace::playbook::PlaybookBullet};
+    use crate::{ace::playbook::PlaybookBullet, llm::LLMConfig};
     use serde_json::json;
 
     #[test]
@@ -513,7 +547,7 @@ mod tests {
         // let pool = setup_test_database().await;
         // let playbook_dao = PlaybookDAO::new(pool);
         // let llm_client = LLMClient::new(LLMConfig::default()).await.unwrap();
-        // 
+        //
         // let curator = Curator::new(playbook_dao, llm_client, None, None).await;
         // assert!(curator.is_ok());
     }
