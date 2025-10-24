@@ -25,11 +25,16 @@ pub struct ApiConfig {
     pub news_api_key: Option<String>,
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
+    pub cerebras_api_key: Option<String>,
+    pub github_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
+    pub provider: String, // "ollama", "cerebras", or "openrouter"
     pub ollama_url: String,
+    pub cerebras_url: String,
+    pub openrouter_url: String,
     pub primary_model: String,
     pub fallback_model: String,
     pub timeout_seconds: u64,
@@ -71,13 +76,21 @@ impl Config {
                 news_api_key: env::var("NEWS_API_KEY").ok(),
                 openai_api_key: env::var("OPENAI_API_KEY").ok(),
                 anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
+                cerebras_api_key: env::var("CEREBRAS_API_KEY").ok(),
+                github_token: env::var("GITHUB_TOKEN").ok(),
             },
             llm: LlmConfig {
+                provider: env::var("LLM_PROVIDER")
+                    .unwrap_or_else(|_| "ollama".to_string()),
                 ollama_url: env::var("OLLAMA_URL")
                     .unwrap_or_else(|_| "http://localhost:11434".to_string()),
-                primary_model: env::var("OLLAMA_PRIMARY_MODEL")
+                cerebras_url: env::var("CEREBRAS_URL")
+                    .unwrap_or_else(|_| "https://api.cerebras.ai/v1".to_string()),
+                openrouter_url: env::var("OPENROUTER_URL")
+                    .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
+                primary_model: env::var("PRIMARY_MODEL")
                     .unwrap_or_else(|_| "llama3.2:3b".to_string()),
-                fallback_model: env::var("LLM_FALLBACK_MODEL")
+                fallback_model: env::var("FALLBACK_MODEL")
                     .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
                 timeout_seconds: env::var("LLM_TIMEOUT_SECONDS")
                     .unwrap_or_else(|_| "30".to_string())
@@ -123,9 +136,14 @@ impl Default for Config {
                 news_api_key: None,
                 openai_api_key: None,
                 anthropic_api_key: None,
+                cerebras_api_key: None,
+                github_token: None,
             },
             llm: LlmConfig {
+                provider: "ollama".to_string(),
                 ollama_url: "http://localhost:11434".to_string(),
+                cerebras_url: "https://api.cerebras.ai/v1".to_string(),
+                openrouter_url: "https://openrouter.ai/api/v1".to_string(),
                 primary_model: "llama3.2:3b".to_string(),
                 fallback_model: "gpt-4o-mini".to_string(),
                 timeout_seconds: 30,

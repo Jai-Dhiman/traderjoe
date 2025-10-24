@@ -71,3 +71,6 @@ tmp/
 
 WARP.md
 .claude/
+
+.sqlx/
+.venv/

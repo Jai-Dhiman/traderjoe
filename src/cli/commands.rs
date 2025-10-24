@@ -41,6 +41,15 @@ pub async fn execute(pool: PgPool, recommendation_id: Uuid) -> Result<()> {
         recommendation_id
     );
 
+    // Pre-execution validation: Check all required services
+    println!("🔍 Running pre-execution validation...");
+    if let Err(e) = validate_required_services(&pool).await {
+        println!("❌ Pre-execution validation FAILED: {}", e);
+        println!("   Cannot execute trade - please resolve the issues above");
+        return Err(e);
+    }
+    println!("✅ All required services validated\n");
+
     // Check circuit breaker
     let circuit_breaker = CircuitBreaker::new(pool.clone(), CircuitBreakerConfig::default());
     if !circuit_breaker.is_trading_allowed().await? {
@@ -275,6 +284,226 @@ pub async fn positions(pool: PgPool) -> Result<()> {
         );
     }
     println!("\n");
+
+    Ok(())
+}
+
+/// Close an open position manually
+pub async fn close(pool: PgPool, trade_id: Uuid, reason: Option<String>) -> Result<()> {
+    use crate::data::MarketDataClient;
+    use crate::trading::{ExitReason, PaperTradingEngine};
+
+    info!("🔚 Closing position {}", trade_id);
+
+    let engine = PaperTradingEngine::new(pool.clone());
+
+    // Get the trade to verify it exists and is open
+    let trade = engine.get_trade(trade_id).await?;
+
+    if trade.status != crate::trading::TradeStatus::Open {
+        println!("❌ Cannot close trade: status is {:?}", trade.status);
+        println!("   Only OPEN trades can be closed");
+        return Ok(());
+    }
+
+    // Fetch current market price for the symbol
+    let market_client = MarketDataClient::new(pool.clone());
+    let latest_data = market_client.fetch_latest(&trade.symbol).await?;
+    let current_price = latest_data["close"]
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get current price from market data"))?;
+
+    // Calculate exit price for option
+    // For simplicity, use same option pricing logic as entry
+    let option_price = current_price * 0.004; // ~0.4% of underlying
+
+    println!("📊 Current Market Data:");
+    println!("   Symbol: {}", trade.symbol);
+    println!("   Current Price: ${:.2}", current_price);
+    println!("   Estimated Option Price: ${:.2}", option_price);
+    println!("\n📋 Position Details:");
+    println!("   Entry Price: ${:.2}", trade.entry_price);
+    println!("   Entry Time: {}", trade.entry_time.format("%Y-%m-%d %H:%M"));
+    println!("   Contracts: {}", trade.shares);
+
+    // Calculate estimated P&L before closing
+    let price_diff = match trade.trade_type {
+        crate::trading::TradeType::Call => option_price - trade.entry_price,
+        crate::trading::TradeType::Put => trade.entry_price - option_price,
+        crate::trading::TradeType::Flat => 0.0,
+    };
+    let gross_pnl = price_diff * trade.shares;
+    let estimated_pnl = gross_pnl - (trade.commission * 2.0);
+    let estimated_pnl_pct = estimated_pnl / trade.position_size_usd;
+
+    println!("\n💰 Estimated P&L:");
+    println!("   P&L: ${:+.2}", estimated_pnl);
+    println!("   P&L %: {:+.1}%", estimated_pnl_pct * 100.0);
+
+    // Ask for confirmation
+    println!("\n⚠️  Are you sure you want to close this position? (yes/no)");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    if !input.trim().eq_ignore_ascii_case("yes") {
+        println!("❌ Close operation cancelled");
+        return Ok(());
+    }
+
+    // Determine exit reason
+    let exit_reason = if reason.is_some() {
+        ExitReason::Manual
+    } else {
+        ExitReason::Manual
+    };
+
+    // Close the trade
+    let closed_trade = engine.exit_trade(trade_id, option_price, exit_reason).await?;
+
+    // Display confirmation
+    println!("\n✅ Position Closed Successfully");
+    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!("║                EXIT CONFIRMATION                           ║");
+    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!("📊 Trade Summary:");
+    println!("   Trade ID: {}", closed_trade.id);
+    println!("   Symbol: {}", closed_trade.symbol);
+    println!("   Type: {:?}", closed_trade.trade_type);
+    println!(
+        "   Entry: ${:.2} @ {}",
+        closed_trade.entry_price,
+        closed_trade.entry_time.format("%Y-%m-%d %H:%M")
+    );
+    println!(
+        "   Exit: ${:.2} @ {}",
+        closed_trade.exit_price.unwrap_or(0.0),
+        closed_trade
+            .exit_time
+            .unwrap_or(chrono::Utc::now())
+            .format("%Y-%m-%d %H:%M")
+    );
+    println!("   Contracts: {}", closed_trade.shares);
+    println!("\n💰 Final P&L:");
+    println!("   P&L: ${:+.2}", closed_trade.pnl.unwrap_or(0.0));
+    println!(
+        "   P&L %: {:+.1}%",
+        closed_trade.pnl_pct.unwrap_or(0.0) * 100.0
+    );
+    if let Some(exit_reason_val) = closed_trade.exit_reason {
+        println!("   Exit Reason: {:?}", exit_reason_val);
+    }
+    if let Some(note) = reason {
+        println!("   Note: {}", note);
+    }
+    println!("\n═══════════════════════════════════════════════════════════\n");
+
+    Ok(())
+}
+
+/// Run auto-exit checks for all open positions
+pub async fn auto_exit(pool: PgPool, exit_time: Option<String>) -> Result<()> {
+    use crate::data::MarketDataClient;
+    use crate::trading::{AutoExitConfig, AutoExitManager, PaperTradingEngine};
+
+    info!("⏰ Running auto-exit checks for open positions");
+
+    // Parse custom exit time if provided
+    let mut config = AutoExitConfig::default();
+    if let Some(time_str) = exit_time {
+        // Parse time string (e.g., "15:00")
+        let parts: Vec<&str> = time_str.split(':').collect();
+        if parts.len() == 2 {
+            let hour: u32 = parts[0].parse()?;
+            let minute: u32 = parts[1].parse()?;
+            config.auto_exit_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)
+                .ok_or_else(|| anyhow::anyhow!("Invalid time format"))?;
+            println!("✅ Using custom exit time: {}", config.auto_exit_time);
+        } else {
+            return Err(anyhow::anyhow!(
+                "Invalid time format. Use HH:MM format (e.g., 15:00)"
+            ));
+        }
+    }
+
+    // Get all open positions
+    let engine = PaperTradingEngine::new(pool.clone());
+    let open_positions = engine.get_open_positions().await?;
+
+    if open_positions.is_empty() {
+        println!("✅ No open positions to check");
+        return Ok(());
+    }
+
+    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!("║              AUTO-EXIT CHECK RESULTS                       ║");
+    println!("╚════════════════════════════════════════════════════════════╝\n");
+    println!("📊 Checking {} open position(s)...\n", open_positions.len());
+
+    // Fetch current prices for all symbols
+    let market_client = MarketDataClient::new(pool.clone());
+    let mut current_prices = std::collections::HashMap::new();
+
+    for trade in &open_positions {
+        match market_client.fetch_latest(&trade.symbol).await {
+            Ok(data) => {
+                if let Some(price) = data["close"].as_f64() {
+                    // Estimate option price
+                    let option_price = price * 0.004;
+                    current_prices.insert(trade.symbol.clone(), option_price);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to fetch price for {}: {}", trade.symbol, e);
+            }
+        }
+    }
+
+    // Run auto-exit checks
+    let manager = AutoExitManager::new(pool, config);
+    let exited_trades = manager.check_and_exit_positions(&current_prices).await?;
+
+    // Display results
+    if exited_trades.is_empty() {
+        println!("✅ All positions are within limits");
+        println!("   No auto-exits triggered");
+    } else {
+        println!("⚠️  {} position(s) were auto-exited:\n", exited_trades.len());
+
+        for trade in &exited_trades {
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("Trade ID: {}", trade.id);
+            println!("Symbol: {}", trade.symbol);
+            println!("Type: {:?}", trade.trade_type);
+            println!(
+                "Entry: ${:.2} @ {}",
+                trade.entry_price,
+                trade.entry_time.format("%Y-%m-%d %H:%M")
+            );
+            println!(
+                "Exit: ${:.2} @ {}",
+                trade.exit_price.unwrap_or(0.0),
+                trade
+                    .exit_time
+                    .unwrap_or(chrono::Utc::now())
+                    .format("%Y-%m-%d %H:%M")
+            );
+            println!("P&L: ${:+.2}", trade.pnl.unwrap_or(0.0));
+            println!(
+                "P&L %: {:+.1}%",
+                trade.pnl_pct.unwrap_or(0.0) * 100.0
+            );
+            if let Some(reason) = &trade.exit_reason {
+                println!("Exit Reason: {:?}", reason);
+            }
+            println!();
+        }
+
+        let total_pnl: f64 = exited_trades.iter().map(|t| t.pnl.unwrap_or(0.0)).sum();
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("💰 Total P&L from Auto-Exits: ${:+.2}", total_pnl);
+    }
+
+    println!("\n═══════════════════════════════════════════════════════════\n");
 
     Ok(())
 }
@@ -901,7 +1130,7 @@ pub async fn backtest(
             continue;
         }
 
-        let current_price = last_candle.close;
+        let _current_price = last_candle.close;
 
         // Calculate position size using Kelly Criterion based on signal confidence
         let position_value = match position_sizer.calculate_position_size_simple(capital, signals.confidence as f64) {
@@ -1106,6 +1335,114 @@ pub async fn backtest(
     );
 
     println!("\n");
+
+    Ok(())
+}
+
+/// Validate all required services before trade execution
+/// This prevents trades from being executed when critical services are unavailable
+async fn validate_required_services(pool: &PgPool) -> Result<()> {
+    use traderjoe::{data::MarketDataClient, llm::LLMClient};
+    use tracing::{error, info, warn};
+
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    // 1. Check database connectivity
+    info!("Validating database connectivity...");
+    match sqlx::query("SELECT 1").fetch_one(pool).await {
+        Ok(_) => {
+            info!("✅ Database connection validated");
+        }
+        Err(e) => {
+            error!("❌ Database connection failed: {}", e);
+            errors.push(format!("Database: {}", e));
+        }
+    }
+
+    // 2. Check Polygon.io API (market data) - CRITICAL
+    info!("Validating Polygon.io market data API...");
+    let market_client = MarketDataClient::new(pool.clone());
+    match market_client.fetch_latest("SPY").await {
+        Ok(_) => {
+            info!("✅ Polygon.io API validated");
+        }
+        Err(e) => {
+            error!("❌ Polygon.io API failed: {}", e);
+            errors.push(format!("Polygon.io (market data): {}", e));
+        }
+    }
+
+    // 3. Check Ollama/LLM connectivity - CRITICAL
+    info!("Validating Ollama/LLM connectivity...");
+    let config = traderjoe::config::Config::load()?;
+    match LLMClient::from_config(&config).await {
+        Ok(llm_client) => {
+            // Verify Ollama is responsive
+            match llm_client.health_check().await {
+                Ok(_) => {
+                    info!("✅ Ollama/LLM validated");
+                }
+                Err(e) => {
+                    error!("❌ Ollama/LLM health check failed: {}", e);
+                    errors.push(format!("Ollama/LLM: {}", e));
+                }
+            }
+        }
+        Err(e) => {
+            error!("❌ Ollama/LLM connection failed: {}", e);
+            errors.push(format!("Ollama/LLM: {}", e));
+        }
+    }
+
+    // 4. Check optional services (warnings only, not blocking)
+    info!("Validating optional services...");
+
+    // Check if Exa API key is configured
+    if std::env::var("EXA_API_KEY").is_err() {
+        warn!("⚠️  Exa API key not configured - research data will be limited");
+        warnings.push("Exa API (research) not configured");
+    }
+
+    // Check if Reddit credentials are configured
+    if std::env::var("REDDIT_CLIENT_ID").is_err()
+        || std::env::var("REDDIT_CLIENT_SECRET").is_err()
+    {
+        warn!("⚠️  Reddit credentials not configured - sentiment data will be limited");
+        warnings.push("Reddit API (sentiment) not configured");
+    }
+
+    // Display results
+    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!("║          PRE-EXECUTION VALIDATION RESULTS                  ║");
+    println!("╚════════════════════════════════════════════════════════════╝\n");
+
+    if errors.is_empty() {
+        println!("✅ All critical services validated successfully");
+    } else {
+        println!("❌ Critical service validation FAILED:");
+        for error in &errors {
+            println!("   ❌ {}", error);
+        }
+    }
+
+    if !warnings.is_empty() {
+        println!("\n⚠️  Optional services not configured:");
+        for warning in &warnings {
+            println!("   ⚠️  {}", warning);
+        }
+        println!("\nNote: Trades can still execute, but decisions may rely on limited data.");
+    }
+
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    // Return error if any critical services failed
+    if !errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Critical services unavailable: {}",
+            errors.join(", ")
+        ));
+    }
 
     Ok(())
 }

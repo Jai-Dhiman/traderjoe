@@ -1,7 +1,3 @@
-// TraderJoe - ACE-Enhanced Daily Trading System
-// A comprehensive trading system that combines Extended Thinking (ACE - Augmented Context Evolution)
-// with traditional machine learning to make daily trading decisions.
-
 #![deny(clippy::unwrap_used)]
 
 pub mod ace;

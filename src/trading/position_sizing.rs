@@ -20,23 +20,36 @@ impl Default for PositionSizer {
     fn default() -> Self {
         Self {
             max_position_size_pct: 0.05, // 5% max
-            kelly_fraction: 0.25,         // Quarter Kelly (conservative)
-            min_confidence: 0.50,         // 50% minimum confidence
+            kelly_fraction: 0.25,        // Quarter Kelly (conservative)
+            min_confidence: 0.50,        // 50% minimum confidence
         }
     }
 }
 
 impl PositionSizer {
-    pub fn new(max_position_size_pct: f64, kelly_fraction: f64, min_confidence: f64) -> Result<Self> {
+    pub fn new(
+        max_position_size_pct: f64,
+        kelly_fraction: f64,
+        min_confidence: f64,
+    ) -> Result<Self> {
         // Validate parameters
         if max_position_size_pct <= 0.0 || max_position_size_pct > 1.0 {
-            bail!("max_position_size_pct must be between 0 and 1, got {}", max_position_size_pct);
+            bail!(
+                "max_position_size_pct must be between 0 and 1, got {}",
+                max_position_size_pct
+            );
         }
         if kelly_fraction <= 0.0 || kelly_fraction > 1.0 {
-            bail!("kelly_fraction must be between 0 and 1, got {}", kelly_fraction);
+            bail!(
+                "kelly_fraction must be between 0 and 1, got {}",
+                kelly_fraction
+            );
         }
         if min_confidence < 0.0 || min_confidence > 1.0 {
-            bail!("min_confidence must be between 0 and 1, got {}", min_confidence);
+            bail!(
+                "min_confidence must be between 0 and 1, got {}",
+                min_confidence
+            );
         }
 
         Ok(Self {
@@ -112,7 +125,6 @@ impl PositionSizer {
     }
 
     /// Calculate position size with default historical statistics
-    ///
     /// Uses conservative defaults if no historical data is available:
     /// - Win rate: 55%
     /// - Avg win: $100
@@ -124,7 +136,7 @@ impl PositionSizer {
     ) -> Result<f64> {
         self.calculate_position_size(
             account_balance,
-            0.55, // 55% win rate (conservative default)
+            0.55,  // 55% win rate (conservative default)
             100.0, // $100 avg win
             60.0,  // $60 avg loss
             confidence,
@@ -132,11 +144,7 @@ impl PositionSizer {
     }
 
     /// Calculate number of contracts/shares for a given position size
-    pub fn calculate_shares(
-        &self,
-        position_size_usd: f64,
-        price_per_share: f64,
-    ) -> Result<f64> {
+    pub fn calculate_shares(&self, position_size_usd: f64, price_per_share: f64) -> Result<f64> {
         if price_per_share <= 0.0 {
             bail!("Price per share must be positive");
         }
@@ -170,13 +178,8 @@ impl PositionSizer {
 }
 
 /// Calculate optimal Kelly position size (utility function)
-///
 /// Returns 0.0 if inputs are invalid (avg_win is 0 or negative, etc.)
-pub fn kelly_criterion(
-    win_rate: f64,
-    avg_win: f64,
-    avg_loss: f64,
-) -> f64 {
+pub fn kelly_criterion(win_rate: f64, avg_win: f64, avg_loss: f64) -> f64 {
     // Validate inputs to prevent division by zero or invalid calculations
     if avg_win <= 0.0 || avg_loss <= 0.0 {
         return 0.0;
@@ -193,12 +196,7 @@ pub fn kelly_criterion(
 }
 
 /// Calculate fractional Kelly (utility function)
-pub fn fractional_kelly(
-    win_rate: f64,
-    avg_win: f64,
-    avg_loss: f64,
-    fraction: f64,
-) -> f64 {
+pub fn fractional_kelly(win_rate: f64, avg_win: f64, avg_loss: f64, fraction: f64) -> f64 {
     kelly_criterion(win_rate, avg_win, avg_loss) * fraction
 }
 

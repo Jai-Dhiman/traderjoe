@@ -409,9 +409,9 @@ impl AccountManager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_sharpe_ratio_calculation() {
-        let manager = AccountManager::new(sqlx::PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+    #[tokio::test]
+    async fn test_sharpe_ratio_calculation() {
+        let manager = AccountManager::new(sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("Failed to create pool"));
 
         // Sample daily returns
         let returns = vec![0.01, 0.02, -0.01, 0.015, 0.01, -0.005, 0.02];
@@ -422,9 +422,9 @@ mod tests {
         assert!(sharpe > 0.0);
     }
 
-    #[test]
-    fn test_sharpe_ratio_zero_returns() {
-        let manager = AccountManager::new(sqlx::PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+    #[tokio::test]
+    async fn test_sharpe_ratio_zero_returns() {
+        let manager = AccountManager::new(sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("Failed to create pool"));
 
         let returns = vec![0.0, 0.0, 0.0];
 

@@ -103,7 +103,7 @@ impl ContextDAO {
                 confidence: row.confidence,
                 outcome: row.outcome,
                 embedding: None,
-                ingested_at: row.ingested_at.unwrap_or_else(Utc::now),
+                ingested_at: row.ingested_at.unwrap_or_else(|| row.timestamp),
             })
             .collect();
 
@@ -217,7 +217,7 @@ impl ContextDAO {
                 confidence: row.confidence,
                 outcome: row.outcome,
                 embedding: None,
-                ingested_at: row.ingested_at.unwrap_or_else(Utc::now),
+                ingested_at: row.ingested_at.unwrap_or_else(|| row.timestamp),
             })
             .collect())
     }
@@ -338,7 +338,7 @@ impl ContextDAO {
                 confidence: row.confidence,
                 outcome: row.outcome,
                 embedding: None,
-                ingested_at: row.ingested_at.unwrap_or_else(Utc::now),
+                ingested_at: row.ingested_at.unwrap_or_else(|| row.timestamp),
             })
             .collect())
     }
@@ -406,7 +406,7 @@ impl ContextDAO {
                 confidence: row.confidence,
                 outcome: row.outcome,
                 embedding: None,
-                ingested_at: row.ingested_at.unwrap_or_else(Utc::now),
+                ingested_at: row.ingested_at.unwrap_or_else(|| row.timestamp),
             })
             .collect())
     }
@@ -579,7 +579,7 @@ mod tests {
             .expect("Failed to get context stats");
 
         // Stats should be valid (test depends on existing data)
-        assert!(stats.total_contexts >= 0);
+        // total_contexts is usize, so it's always >= 0
         assert!(stats.contexts_with_embeddings <= stats.total_contexts);
         assert!(stats.contexts_with_outcomes <= stats.total_contexts);
     }

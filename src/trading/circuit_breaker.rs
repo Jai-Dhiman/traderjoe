@@ -5,8 +5,8 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use uuid::Uuid;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use super::account::AccountManager;
 use super::paper::PaperTradingEngine;
@@ -159,7 +159,10 @@ impl CircuitBreaker {
 
     /// Get current circuit breaker state with row-level lock (for update)
     /// This prevents race conditions during check-and-halt operations
-    async fn get_current_state_for_update(&self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<CircuitBreakerState> {
+    async fn get_current_state_for_update(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<CircuitBreakerState> {
         let state = sqlx::query_as!(
             CircuitBreakerState,
             r#"
@@ -333,6 +336,19 @@ impl CircuitBreaker {
     /// This method uses a transaction with row-level locking to ensure
     /// only one halt can be recorded at a time, preventing race conditions.
     async fn halt(&self, reason: CircuitBreakerReason, triggered_by: String) -> Result<()> {
+        self.halt_with_notes(reason, triggered_by, None).await
+    }
+
+    /// Halt trading with optional notes
+    ///
+    /// This method uses a transaction with row-level locking to ensure
+    /// only one halt can be recorded at a time, preventing race conditions.
+    async fn halt_with_notes(
+        &self,
+        reason: CircuitBreakerReason,
+        triggered_by: String,
+        notes: Option<String>,
+    ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
         // Check current state with lock to prevent duplicate halts
@@ -349,13 +365,14 @@ impl CircuitBreaker {
 
         sqlx::query!(
             r#"
-            INSERT INTO circuit_breakers (is_halted, reason, halted_at, triggered_by, created_at)
-            VALUES ($1, $2::text, $3, $4, $5)
+            INSERT INTO circuit_breakers (is_halted, reason, halted_at, triggered_by, notes, created_at)
+            VALUES ($1, $2::text, $3, $4, $5, $6)
             "#,
             true,
             reason.to_string(),
             halted_at,
             triggered_by.clone(),
+            notes.map(|n| serde_json::Value::String(n)),
             halted_at
         )
         .execute(&mut *tx)
@@ -371,8 +388,8 @@ impl CircuitBreaker {
 
     /// Manually halt trading
     pub async fn manual_halt(&self, notes: Option<String>) -> Result<()> {
-        let triggered_by = notes.unwrap_or_else(|| "Manual halt requested".to_string());
-        self.halt(CircuitBreakerReason::ManualHalt, triggered_by)
+        let triggered_by = "Manual halt requested".to_string();
+        self.halt_with_notes(CircuitBreakerReason::ManualHalt, triggered_by, notes)
             .await
     }
 
@@ -462,10 +479,7 @@ mod tests {
             CircuitBreakerReason::SystemError.to_string(),
             "SYSTEM_ERROR"
         );
-        assert_eq!(
-            CircuitBreakerReason::ManualHalt.to_string(),
-            "MANUAL_HALT"
-        );
+        assert_eq!(CircuitBreakerReason::ManualHalt.to_string(), "MANUAL_HALT");
     }
 
     #[test]

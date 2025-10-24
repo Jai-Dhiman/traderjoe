@@ -89,13 +89,13 @@ impl EveningReviewResult {
 
 /// Evening review orchestrator
 pub struct EveningOrchestrator {
-    pool: PgPool,
-    config: Config,
+    _pool: PgPool,
+    _config: Config,
     market_client: MarketDataClient,
     context_dao: ContextDAO,
-    playbook_dao: PlaybookDAO,
+    _playbook_dao: PlaybookDAO,
     curator: Curator,
-    paper_trading: PaperTradingEngine,
+    _paper_trading: PaperTradingEngine,
 }
 
 impl EveningOrchestrator {
@@ -122,13 +122,13 @@ impl EveningOrchestrator {
         info!("Evening Orchestrator initialized successfully");
 
         Ok(Self {
-            pool,
-            config,
+            _pool: pool,
+            _config: config,
             market_client,
             context_dao,
-            playbook_dao,
+            _playbook_dao: playbook_dao,
             curator,
-            paper_trading,
+            _paper_trading: paper_trading,
         })
     }
 
@@ -334,24 +334,38 @@ impl EveningOrchestrator {
         })
     }
 
-    /// Compute actual trading outcome
+    /// Compute actual trading outcome from executed paper trades or hypothetical analysis
     async fn compute_outcome(
         &self,
         context: &crate::ace::context::AceContext,
         decision: &TradingDecision,
     ) -> Result<TradingOutcome> {
+        // First, try to get actual trade execution data from paper trading engine
+        let paper_trade_outcome = self._paper_trading.get_context_outcome(context.id).await;
+
+        if let Ok(Some(outcome)) = paper_trade_outcome {
+            info!("Using actual paper trade outcome for context {}", context.id);
+            return Ok(outcome);
+        }
+
+        info!("No executed paper trade found for context {}, computing hypothetical outcome", context.id);
+
         // Extract symbol from market state
         let symbol = context
             .market_state
             .get("symbol")
             .and_then(|v| v.as_str())
-            .unwrap_or("SPY");
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing symbol in market state - this indicates a data quality issue"
+                )
+            })?;
 
         // Get entry price (from context timestamp)
         let entry_price = context
             .market_state
             .get("market_data")
-            .and_then(|md| md.get("close"))
+            .and_then(|md| md.get("latest_price"))
             .and_then(|c| c.as_f64())
             .ok_or_else(|| anyhow::anyhow!("Missing entry price in market data"))?;
 

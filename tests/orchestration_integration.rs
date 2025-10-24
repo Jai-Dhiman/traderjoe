@@ -1,18 +1,18 @@
 use anyhow::Result;
+use bigdecimal::BigDecimal;
 use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::str::FromStr;
 use traderjoe::{
-    ace::{ContextDAO, PlaybookDAO, TradingDecision},
-    config::{ApisConfig, Config, DatabaseConfig, LLMConfig, TradingConfig},
+    ace::{ContextDAO, PlaybookDAO},
+    config::{ApiConfig, Config, DatabaseConfig, LlmConfig, TradingConfig},
     orchestrator::{EveningOrchestrator, MorningOrchestrator},
     trading::{
         circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
         PaperTradingEngine,
     },
 };
-use uuid::Uuid;
 
 /// Setup test database connection
 async fn setup_test_db() -> PgPool {
@@ -35,35 +35,32 @@ fn create_test_config() -> Config {
             max_connections: 10,
             min_connections: 1,
         },
-        llm: LLMConfig {
+        llm: LlmConfig {
             ollama_url: "http://localhost:11434".to_string(),
-            model_name: "llama3.2:latest".to_string(),
-            temperature: 0.7,
-            max_tokens: 2048,
-            timeout_seconds: 120,
-            enable_openai_fallback: false,
-            openai_api_key: None,
-            openai_model: None,
+            primary_model: "llama3.2:3b".to_string(),
+            fallback_model: "gpt-4o-mini".to_string(),
+            timeout_seconds: 30,
         },
-        apis: ApisConfig {
-            exa_api_key: "test_exa_key".to_string(),
-            reddit_client_id: "test_reddit_id".to_string(),
-            reddit_client_secret: "test_reddit_secret".to_string(),
-            newsapi_key: None,
+        apis: ApiConfig {
+            exa_api_key: Some("test_exa_key".to_string()),
+            reddit_client_id: Some("test_reddit_id".to_string()),
+            reddit_client_secret: Some("test_reddit_secret".to_string()),
+            news_api_key: None,
+            openai_api_key: None,
+            anthropic_api_key: None,
         },
         trading: TradingConfig {
-            default_symbol: "SPY".to_string(),
-            max_position_size_pct: 0.05,
-            default_slippage_pct: 0.03,
-            timezone: "America/New_York".to_string(),
-            paper_trading_mode: true,
+            paper_trading: true,
+            max_position_size_pct: 5.0,
+            max_daily_loss_pct: 3.0,
+            max_weekly_loss_pct: 10.0,
         },
     }
 }
 
 /// Clear test data from database
 async fn clear_test_data(pool: &PgPool) -> Result<()> {
-    sqlx::query!("DELETE FROM paper_trades WHERE trade_id IS NOT NULL")
+    sqlx::query!("DELETE FROM paper_trades WHERE id IS NOT NULL")
         .execute(pool)
         .await?;
     sqlx::query!("DELETE FROM ace_contexts WHERE id IS NOT NULL")
@@ -75,7 +72,7 @@ async fn clear_test_data(pool: &PgPool) -> Result<()> {
     sqlx::query!("DELETE FROM circuit_breakers WHERE id IS NOT NULL")
         .execute(pool)
         .await?;
-    sqlx::query!("DELETE FROM market_data WHERE symbol IS NOT NULL")
+    sqlx::query!("DELETE FROM ohlcv WHERE symbol IS NOT NULL")
         .execute(pool)
         .await?;
 
@@ -100,18 +97,23 @@ async fn insert_sample_market_data(pool: &PgPool, symbol: &str) -> Result<()> {
         let date = base_date - chrono::Duration::days(i);
         let price = 400.0 + (i as f64 * 0.5);
 
+        let open = BigDecimal::from_str(&format!("{:.2}", price))?;
+        let high = BigDecimal::from_str(&format!("{:.2}", price + 5.0))?;
+        let low = BigDecimal::from_str(&format!("{:.2}", price - 5.0))?;
+        let close = BigDecimal::from_str(&format!("{:.2}", price + 2.0))?;
+
         sqlx::query!(
             r#"
-            INSERT INTO market_data (symbol, date, open, high, low, close, volume, source)
+            INSERT INTO ohlcv (symbol, date, open, high, low, close, volume, source)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (symbol, date, source) DO NOTHING
             "#,
             symbol,
             date,
-            price,
-            price + 5.0,
-            price - 5.0,
-            price + 2.0,
+            open,
+            high,
+            low,
+            close,
             50_000_000i64,
             "test"
         )
@@ -381,7 +383,7 @@ async fn test_circuit_breaker_integration_with_orchestration() -> Result<()> {
     println!("Decision generated despite halt: {}", decision.action);
 
     // Paper trading execution should respect circuit breaker
-    let paper_engine = PaperTradingEngine::new(pool.clone());
+    let _paper_engine = PaperTradingEngine::new(pool.clone());
 
     // Verify circuit breaker prevents trade execution
     assert!(
@@ -436,8 +438,8 @@ async fn test_multi_day_pattern_evolution() -> Result<()> {
         );
 
         // Check playbook evolution
-        let bullet_count = playbook_dao.count_bullets().await?;
-        println!("Day {} playbook size: {} bullets", day, bullet_count);
+        let stats = playbook_dao.get_stats().await?;
+        println!("Day {} playbook size: {} bullets", day, stats.total_bullets);
     }
 
     // Verify playbook has accumulated patterns
@@ -445,7 +447,7 @@ async fn test_multi_day_pattern_evolution() -> Result<()> {
     println!("\nFinal playbook has {} bullets", bullets.len());
 
     // Verify contexts are properly linked
-    let context_dao = ContextDAO::new(pool.clone());
+    let _context_dao = ContextDAO::new(pool.clone());
     let all_contexts = sqlx::query!(
         r#"
         SELECT COUNT(*) as count FROM ace_contexts

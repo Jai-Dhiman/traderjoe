@@ -83,7 +83,7 @@ impl Generator {
     /// Extract patterns using LLM analysis
     async fn extract_patterns_via_llm(&self, input: &GeneratorInput) -> Result<Vec<Delta>> {
         // Build context summary for LLM prompt
-        let context_summary = self.build_context_summary(input);
+        let _context_summary = self.build_context_summary(input);
 
         let prompt = ACEPrompts::pattern_extraction_prompt(&input.similar_contexts);
 
@@ -303,7 +303,7 @@ impl Generator {
     fn extract_regime_patterns(
         &self,
         market_state: &serde_json::Value,
-        ml_signals: &serde_json::Value,
+        _ml_signals: &serde_json::Value,
     ) -> Option<Vec<Delta>> {
         let mut patterns = Vec::new();
 

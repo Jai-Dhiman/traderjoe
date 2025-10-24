@@ -3,6 +3,8 @@
 
 #[cfg(feature = "ml")]
 use pyo3::prelude::*;
+#[cfg(feature = "ml")]
+use pyo3::types::PyModule;
 
 /// Trait for ML model predictions
 pub trait Predictor {
@@ -23,7 +25,7 @@ pub struct EnsembleModel;
 
 #[cfg(feature = "ml")]
 #[pymodule]
-fn traderjoe_ml(_py: Python, m: &PyModule) -> PyResult<()> {
+fn traderjoe_ml(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hello_from_rust, m)?)?;
     Ok(())
 }

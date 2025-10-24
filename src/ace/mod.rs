@@ -41,11 +41,11 @@ pub struct ACEEngine {
     embedder: Arc<EmbeddingGemma>,
     vector_store: VectorStore,
     generator: Generator,
-    reflector: Reflector,
-    curator: Curator,
+    _reflector: Reflector,
+    _curator: Curator,
     playbook_dao: PlaybookDAO,
-    context_dao: ContextDAO,
-    pool: PgPool,
+    _context_dao: ContextDAO,
+    _pool: PgPool,
 }
 
 impl ACEEngine {
@@ -81,11 +81,11 @@ impl ACEEngine {
             embedder,
             vector_store,
             generator,
-            reflector,
-            curator,
+            _reflector: reflector,
+            _curator: curator,
             playbook_dao,
-            context_dao,
-            pool,
+            _context_dao: context_dao,
+            _pool: pool,
         })
     }
 

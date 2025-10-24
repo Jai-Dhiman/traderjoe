@@ -1,0 +1,92 @@
+name: Evening Review Routine
+
+on:
+  schedule:
+    # Run at 1:00 PM PST (4:00 PM ET) on weekdays
+    # PST is UTC-8, so 1:00 PM PST = 21:00 UTC (9:00 PM UTC)
+    - cron: '0 21 * * 1-5'
+  workflow_dispatch: # Allow manual trigger for testing
+
+env:
+  RUST_BACKTRACE: 1
+  RUST_LOG: traderjoe=info,sqlx=warn
+
+jobs:
+  evening_review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build TraderJoe
+        env:
+          SQLX_OFFLINE: true
+        run: cargo build --release
+
+      - name: Display Today's Performance
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          echo "Today's trading performance..."
+          ./target/release/traderjoe positions
+
+      - name: Run Evening Review (ACE Reflection)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          PAPER_TRADING: true
+        run: |
+          echo "Running evening review (ACE reflection)..."
+          echo "This will update the playbook based on today's outcomes"
+          ./target/release/traderjoe review
+
+      - name: Display Performance Metrics
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Performance metrics (last 30 days)..."
+          ./target/release/traderjoe performance --days 30
+
+      - name: Check Playbook Evolution
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Checking playbook evolution..."
+          ./target/release/traderjoe playbook-stats
+
+      - name: Summary
+        run: |
+          echo "Daily Review Complete!"
+          echo ""
+          echo "Key Metrics to Monitor:"
+          echo "  • Win Rate should stay > 55%"
+          echo "  • Sharpe Ratio should be > 1.5"
+          echo "  • Max Drawdown should be < 15%"
+          echo "  • ACE confidence should correlate with outcomes"
+          echo ""
+          echo "See you tomorrow!"

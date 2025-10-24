@@ -204,6 +204,28 @@ impl PaperTradingEngine {
         .await
         .context("Failed to insert paper trade")?;
 
+        // Log detailed entry information
+        tracing::info!(
+            trade_id = %trade.id,
+            context_id = ?context_id,
+            symbol = %symbol,
+            trade_type = ?trade_type,
+            entry_price = %entry_price,
+            adjusted_entry = %adjusted_entry_price,
+            shares = %shares,
+            position_size_usd = %position_size_usd,
+            slippage_pct = %slippage_pct,
+            commission = %commission,
+            estimated_slippage = ?estimated_slippage_pct,
+            "📈 TRADE ENTRY: {} {} @ ${:.2} (adjusted: ${:.2}, {} shares, position: ${:.2})",
+            trade_type.to_string(),
+            symbol,
+            entry_price,
+            adjusted_entry_price,
+            shares,
+            position_size_usd
+        );
+
         Ok(trade)
     }
 
@@ -289,6 +311,38 @@ impl PaperTradingEngine {
         .fetch_one(&self.pool)
         .await
         .context("Failed to exit paper trade")?;
+
+        // Calculate duration in hours
+        let duration_hours = (exit_time - trade.entry_time).num_seconds() as f64 / 3600.0;
+
+        // Log detailed exit information with P&L breakdown
+        tracing::info!(
+            trade_id = %trade_id,
+            symbol = %trade.symbol,
+            trade_type = ?trade.trade_type,
+            exit_reason = ?exit_reason,
+            entry_price = %trade.entry_price,
+            exit_price = %exit_price,
+            adjusted_exit = %adjusted_exit_price,
+            gross_pnl = %gross_pnl,
+            commission_total = %(trade.commission * 2.0),
+            net_pnl = %net_pnl,
+            pnl_pct = %(pnl_pct * 100.0),
+            duration_hours = %duration_hours,
+            mfe = ?updated_trade.max_favorable_excursion,
+            mae = ?updated_trade.max_adverse_excursion,
+            "📉 TRADE EXIT: {} {} - {:?} | Entry: ${:.2} → Exit: ${:.2} | P&L: ${:.2} ({:+.1}%) | Duration: {:.1}h | MFE: {:?} MAE: {:?}",
+            trade.trade_type.to_string(),
+            trade.symbol,
+            exit_reason,
+            trade.entry_price,
+            adjusted_exit_price,
+            net_pnl,
+            pnl_pct * 100.0,
+            duration_hours,
+            updated_trade.max_favorable_excursion,
+            updated_trade.max_adverse_excursion
+        );
 
         Ok(updated_trade)
     }
@@ -431,6 +485,100 @@ impl PaperTradingEngine {
         Ok(trades)
     }
 
+    /// Get trading outcome for a specific ACE context (for evening review)
+    /// Returns None if no trade was executed for this context, or if the trade is still open
+    pub async fn get_context_outcome(&self, context_id: Uuid) -> Result<Option<crate::ace::reflector::TradingOutcome>> {
+        // Query for closed trades associated with this context
+        // Use regular query instead of query_as! for offline compilation
+        let row_opt = sqlx::query(
+            r#"
+            SELECT
+                id, context_id, symbol, trade_type, entry_price, entry_time,
+                exit_price, exit_time, shares, status, pnl, pnl_pct, notes,
+                created_at, strike_price, expiration_date, position_size_usd,
+                commission, slippage_pct, max_favorable_excursion, max_adverse_excursion,
+                exit_reason, estimated_slippage_pct, actual_entry_slippage_pct,
+                actual_exit_slippage_pct, market_vix, option_moneyness
+            FROM paper_trades
+            WHERE context_id = $1 AND status = 'CLOSED'
+            ORDER BY exit_time DESC
+            LIMIT 1
+            "#
+        )
+        .bind(context_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to fetch trade by context_id")?;
+
+        let trade_opt = if let Some(row) = row_opt {
+            use sqlx::Row;
+            Some(PaperTrade {
+                id: row.get("id"),
+                context_id: row.get("context_id"),
+                symbol: row.get("symbol"),
+                trade_type: row.get("trade_type"),
+                entry_price: row.get("entry_price"),
+                entry_time: row.get("entry_time"),
+                exit_price: row.get("exit_price"),
+                exit_time: row.get("exit_time"),
+                shares: row.get("shares"),
+                status: row.get("status"),
+                pnl: row.get("pnl"),
+                pnl_pct: row.get("pnl_pct"),
+                notes: row.get("notes"),
+                created_at: row.get("created_at"),
+                strike_price: row.get("strike_price"),
+                expiration_date: row.get("expiration_date"),
+                position_size_usd: row.get("position_size_usd"),
+                commission: row.get("commission"),
+                slippage_pct: row.get("slippage_pct"),
+                max_favorable_excursion: row.get("max_favorable_excursion"),
+                max_adverse_excursion: row.get("max_adverse_excursion"),
+                exit_reason: row.get("exit_reason"),
+                estimated_slippage_pct: row.get("estimated_slippage_pct"),
+                actual_entry_slippage_pct: row.get("actual_entry_slippage_pct"),
+                actual_exit_slippage_pct: row.get("actual_exit_slippage_pct"),
+                market_vix: row.get("market_vix"),
+                option_moneyness: row.get("option_moneyness"),
+            })
+        } else {
+            None
+        };
+
+        if let Some(trade) = trade_opt {
+            // Convert PaperTrade to TradingOutcome
+            let exit_price = trade.exit_price.unwrap_or(trade.entry_price);
+            let exit_time = trade.exit_time.unwrap_or(trade.entry_time);
+            let duration_hours = (exit_time - trade.entry_time).num_seconds() as f64 / 3600.0;
+
+            let pnl_value = trade.pnl.unwrap_or(0.0);
+            let pnl_pct = trade.pnl_pct.unwrap_or(0.0);
+            let win = pnl_value > 0.0;
+
+            let notes = trade.notes.map(|n| {
+                match trade.exit_reason {
+                    Some(ref reason) => format!("Exit reason: {:?}. {}", reason, n),
+                    None => n.to_string(),
+                }
+            });
+
+            Ok(Some(crate::ace::reflector::TradingOutcome {
+                pnl_value,
+                pnl_pct,
+                mfe: trade.max_favorable_excursion,
+                mae: trade.max_adverse_excursion,
+                win,
+                entry_price: trade.entry_price,
+                exit_price,
+                duration_hours,
+                notes,
+            }))
+        } else {
+            // No closed trade found for this context
+            Ok(None)
+        }
+    }
+
     /// Update MFE (Max Favorable Excursion) and MAE (Max Adverse Excursion)
     pub async fn update_excursion(
         &self,
@@ -526,40 +674,47 @@ impl PaperTradingEngine {
 
     /// Analyze slippage performance for closed trades
     pub async fn analyze_slippage(&self, days: Option<i32>) -> Result<SlippageAnalysis> {
-        let days = days.unwrap_or(30);
+        let days_unwrapped = days.unwrap_or(30);
 
         #[derive(Debug)]
         struct SlippageRow {
-            vix_range: String,
-            moneyness: String,
+            vix_range: Option<String>,
+            moneyness: Option<String>,
             total_trades: i64,
-            avg_estimated: f64,
-            avg_actual: f64,
+            avg_estimated: Option<f64>,
+            avg_actual: Option<f64>,
         }
 
         let rows = sqlx::query_as!(
             SlippageRow,
             r#"
             SELECT
-                CASE
-                    WHEN market_vix < 15 THEN 'VIX_LOW'
-                    WHEN market_vix < 25 THEN 'VIX_NORMAL'
-                    WHEN market_vix < 35 THEN 'VIX_ELEVATED'
-                    ELSE 'VIX_HIGH'
-                END as "vix_range!",
-                COALESCE(option_moneyness, 'ATM') as "moneyness!",
+                vix_range,
+                moneyness,
                 COUNT(*) as "total_trades!",
                 AVG(estimated_slippage_pct) as "avg_estimated!",
-                AVG(COALESCE(actual_entry_slippage_pct, estimated_slippage_pct)) as "avg_actual!"
-            FROM paper_trades
-            WHERE
-                status = 'CLOSED'
-                AND entry_time > NOW() - INTERVAL '1 day' * $1
-                AND estimated_slippage_pct IS NOT NULL
+                AVG(actual_slippage) as "avg_actual!"
+            FROM (
+                SELECT
+                    CASE
+                        WHEN market_vix < 15 THEN 'VIX_LOW'
+                        WHEN market_vix < 25 THEN 'VIX_NORMAL'
+                        WHEN market_vix < 35 THEN 'VIX_ELEVATED'
+                        ELSE 'VIX_HIGH'
+                    END as vix_range,
+                    COALESCE(option_moneyness, 'ATM') as moneyness,
+                    estimated_slippage_pct,
+                    COALESCE(actual_entry_slippage_pct, estimated_slippage_pct) as actual_slippage
+                FROM paper_trades
+                WHERE
+                    status = 'CLOSED'
+                    AND entry_time > NOW() - INTERVAL '1 day' * $1
+                    AND estimated_slippage_pct IS NOT NULL
+            ) as trades
             GROUP BY vix_range, moneyness
             ORDER BY vix_range, moneyness
             "#,
-            days
+            days_unwrapped as f64
         )
         .fetch_all(&self.pool)
         .await
@@ -567,19 +722,21 @@ impl PaperTradingEngine {
 
         let mut results = Vec::new();
         for row in rows {
-            let error = row.avg_actual - row.avg_estimated;
-            let error_pct = if row.avg_estimated != 0.0 {
-                (error / row.avg_estimated) * 100.0
+            let avg_estimated = row.avg_estimated.unwrap_or_default();
+            let avg_actual = row.avg_actual.unwrap_or_default();
+            let error = avg_actual - avg_estimated;
+            let error_pct = if avg_estimated != 0.0 {
+                (error / avg_estimated) * 100.0
             } else {
                 0.0
             };
 
             results.push(SlippageResult {
-                vix_range: row.vix_range,
-                moneyness: row.moneyness,
-                total_trades: row.total_trades,
-                avg_estimated_slippage: row.avg_estimated,
-                avg_actual_slippage: row.avg_actual,
+                vix_range: row.vix_range.unwrap_or_default(),
+                moneyness: row.moneyness.unwrap_or_default(),
+                total_trades: row.total_trades as i32,
+                avg_estimated_slippage: avg_estimated,
+                avg_actual_slippage: avg_actual,
                 slippage_error: error,
                 slippage_error_pct: error_pct,
             });
@@ -621,7 +778,7 @@ impl PaperTradingEngine {
                 calibration_date,
                 result.vix_range,
                 result.moneyness,
-                result.total_trades,
+                result.total_trades as i32,
                 result.avg_estimated_slippage,
                 result.avg_actual_slippage,
                 result.slippage_error,
@@ -654,7 +811,7 @@ pub struct SlippageAnalysis {
 pub struct SlippageResult {
     pub vix_range: String,
     pub moneyness: String,
-    pub total_trades: i64,
+    pub total_trades: i32,
     pub avg_estimated_slippage: f64,
     pub avg_actual_slippage: f64,
     pub slippage_error: f64,
@@ -666,7 +823,7 @@ pub struct SlippageCalibration {
     pub vix_range: String,
     pub moneyness: String,
     pub recommended_slippage: f64,
-    pub total_trades: i64,
+    pub total_trades: i32,
     pub slippage_error_pct: f64,
 }
 

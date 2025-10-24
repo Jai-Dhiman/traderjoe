@@ -1,8 +1,10 @@
 use anyhow::Result;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
 use tokio;
-use traderjoe::trading::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerReason};
+use traderjoe::trading::circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerReason,
+};
 
 async fn setup_test_db() -> PgPool {
     let database_url = std::env::var("DATABASE_URL")
@@ -15,9 +17,18 @@ async fn setup_test_db() -> PgPool {
         .expect("Failed to connect to test database")
 }
 
-async fn clear_circuit_breaker_state(pool: &PgPool) -> Result<()> {
+async fn setup_test_transaction(pool: &PgPool) -> Result<Transaction<'_, Postgres>> {
+    let mut tx = pool.begin().await?;
+
+    // Clean up all test-related tables
     sqlx::query!("DELETE FROM circuit_breakers")
-        .execute(pool)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query!("DELETE FROM account_balance")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query!("DELETE FROM paper_trades")
+        .execute(&mut *tx)
         .await?;
 
     // Insert initial state (not halted)
@@ -27,16 +38,16 @@ async fn clear_circuit_breaker_state(pool: &PgPool) -> Result<()> {
         VALUES (false, NOW())
         "#
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    Ok(())
+    Ok(tx)
 }
 
 #[tokio::test]
 async fn test_concurrent_halt_attempts() -> Result<()> {
     let pool = setup_test_db().await;
-    clear_circuit_breaker_state(&pool).await?;
+    let tx = setup_test_transaction(&pool).await?;
 
     let config = CircuitBreakerConfig::default();
     let breaker = Arc::new(CircuitBreaker::new(pool.clone(), config));
@@ -64,11 +75,10 @@ async fn test_concurrent_halt_attempts() -> Result<()> {
     }
 
     // Verify only ONE halt record was created (plus the initial non-halted state = 2 total)
-    let halt_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM circuit_breakers WHERE is_halted = true"
-    )
-    .fetch_one(&pool)
-    .await?;
+    let halt_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM circuit_breakers WHERE is_halted = true")
+            .fetch_one(&pool)
+            .await?;
 
     assert_eq!(
         halt_count, 1,
@@ -80,13 +90,16 @@ async fn test_concurrent_halt_attempts() -> Result<()> {
     let is_halted = breaker.get_current_state().await?.is_halted;
     assert!(is_halted, "Circuit breaker should be halted");
 
+    // Rollback transaction to clean up
+    tx.rollback().await?;
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_concurrent_halt_on_error() -> Result<()> {
     let pool = setup_test_db().await;
-    clear_circuit_breaker_state(&pool).await?;
+    let tx = setup_test_transaction(&pool).await?;
 
     let config = CircuitBreakerConfig::default();
     let breaker = Arc::new(CircuitBreaker::new(pool.clone(), config));
@@ -128,13 +141,16 @@ async fn test_concurrent_halt_on_error() -> Result<()> {
     assert!(state.is_halted);
     assert_eq!(state.reason, Some(CircuitBreakerReason::SystemError));
 
+    // Rollback transaction to clean up
+    tx.rollback().await?;
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_no_race_condition_in_check_and_halt() -> Result<()> {
     let pool = setup_test_db().await;
-    clear_circuit_breaker_state(&pool).await?;
+    let tx = setup_test_transaction(&pool).await?;
 
     // Initialize account balance
     sqlx::query!(
@@ -162,9 +178,7 @@ async fn test_no_race_condition_in_check_and_halt() -> Result<()> {
     // Spawn 8 concurrent check_and_halt calls
     for _ in 0..8 {
         let breaker_clone = Arc::clone(&breaker);
-        let handle = tokio::spawn(async move {
-            breaker_clone.check_and_halt().await
-        });
+        let handle = tokio::spawn(async move { breaker_clone.check_and_halt().await });
         handles.push(handle);
     }
 
@@ -200,13 +214,16 @@ async fn test_no_race_condition_in_check_and_halt() -> Result<()> {
         halt_count
     );
 
+    // Rollback transaction to clean up
+    tx.rollback().await?;
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_trading_allowed_check_concurrency() -> Result<()> {
     let pool = setup_test_db().await;
-    clear_circuit_breaker_state(&pool).await?;
+    let tx = setup_test_transaction(&pool).await?;
 
     let config = CircuitBreakerConfig::default();
     let breaker = Arc::new(CircuitBreaker::new(pool.clone(), config));
@@ -222,9 +239,7 @@ async fn test_trading_allowed_check_concurrency() -> Result<()> {
     // Spawn many concurrent is_trading_allowed checks
     for _ in 0..20 {
         let breaker_clone = Arc::clone(&breaker);
-        let handle = tokio::spawn(async move {
-            breaker_clone.is_trading_allowed().await
-        });
+        let handle = tokio::spawn(async move { breaker_clone.is_trading_allowed().await });
         handles.push(handle);
     }
 
@@ -236,6 +251,9 @@ async fn test_trading_allowed_check_concurrency() -> Result<()> {
         let is_allowed = result.unwrap().unwrap();
         assert!(!is_allowed, "Trading should not be allowed after halt");
     }
+
+    // Rollback transaction to clean up
+    tx.rollback().await?;
 
     Ok(())
 }

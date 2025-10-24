@@ -1,4 +1,5 @@
 // Custom pgvector type for sqlx to handle vector type encoding/decoding
+// Uses binary protocol for correct encoding
 
 use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
@@ -49,17 +50,24 @@ impl PgHasArrayType for PgVector {
 
 impl Encode<'_, Postgres> for PgVector {
     fn encode_by_ref(&self, buf: &mut PgArgumentBuffer) -> IsNull {
-        // Format: [1.0, 2.0, 3.0] as a PostgreSQL array string
-        let vector_str = format!(
-            "[{}]",
-            self.0
-                .iter()
-                .map(|f| f.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        // pgvector binary format:
+        // - 2 bytes: number of dimensions (u16, big-endian)
+        // - 2 bytes: unused (0)
+        // - for each dimension: 4 bytes (f32, big-endian / network byte order)
 
-        buf.extend_from_slice(vector_str.as_bytes());
+        let dim = self.0.len() as u16;
+
+        // Write dimension count
+        buf.extend_from_slice(&dim.to_be_bytes());
+
+        // Write unused bytes
+        buf.extend_from_slice(&[0u8, 0u8]);
+
+        // Write float values in big-endian
+        for &value in &self.0 {
+            buf.extend_from_slice(&value.to_be_bytes());
+        }
+
         IsNull::No
     }
 }

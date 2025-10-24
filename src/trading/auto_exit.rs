@@ -79,15 +79,38 @@ impl AutoExitManager {
             };
 
             // Check exit conditions
-            if let Some((exit_reason, should_exit)) =
+            if let Some((exit_reason, should_exit, exit_details)) =
                 self.should_exit(&trade, current_price, Utc::now())
             {
                 if should_exit {
+                    // Calculate current P&L for logging
+                    let current_pnl_pct = match trade.trade_type {
+                        super::paper::TradeType::Call => {
+                            (current_price - trade.entry_price) / trade.entry_price
+                        }
+                        super::paper::TradeType::Put => {
+                            (trade.entry_price - current_price) / trade.entry_price
+                        }
+                        super::paper::TradeType::Flat => 0.0,
+                    };
+
                     info!(
-                        "Exiting trade {} ({}): {:?}",
-                        trade.id,
+                        trade_id = %trade.id,
+                        symbol = %trade.symbol,
+                        trade_type = ?trade.trade_type,
+                        exit_reason = ?exit_reason,
+                        entry_price = %trade.entry_price,
+                        current_price = %current_price,
+                        current_pnl_pct = %(current_pnl_pct * 100.0),
+                        exit_details = %exit_details,
+                        "🚨 AUTO-EXIT TRIGGERED: {} {} | Reason: {:?} | Entry: ${:.2} → Current: ${:.2} | P&L: {:+.1}% | {}",
+                        trade.trade_type.to_string(),
                         trade.symbol,
-                        exit_reason
+                        exit_reason,
+                        trade.entry_price,
+                        current_price,
+                        current_pnl_pct * 100.0,
+                        exit_details
                     );
 
                     // Update MFE/MAE before exiting
@@ -107,29 +130,45 @@ impl AutoExitManager {
 
     /// Check if a trade should be exited
     ///
-    /// Returns: (ExitReason, should_exit)
+    /// Returns: (ExitReason, should_exit, details_message)
     fn should_exit(
         &self,
         trade: &PaperTrade,
         current_price: f64,
         now: DateTime<Utc>,
-    ) -> Option<(ExitReason, bool)> {
+    ) -> Option<(ExitReason, bool, String)> {
         // Calculate current P&L percentage
         let pnl_pct = (current_price - trade.entry_price) / trade.entry_price;
 
         // Check stop-loss
         if self.config.enable_stop_loss && pnl_pct <= self.config.stop_loss_pct {
-            return Some((ExitReason::StopLoss, true));
+            let details = format!(
+                "Stop-loss triggered at {:+.1}% (threshold: {:+.1}%)",
+                pnl_pct * 100.0,
+                self.config.stop_loss_pct * 100.0
+            );
+            return Some((ExitReason::StopLoss, true, details));
         }
 
         // Check take-profit
         if self.config.enable_take_profit && pnl_pct >= self.config.take_profit_pct {
-            return Some((ExitReason::TakeProfit, true));
+            let details = format!(
+                "Take-profit triggered at {:+.1}% (threshold: {:+.1}%)",
+                pnl_pct * 100.0,
+                self.config.take_profit_pct * 100.0
+            );
+            return Some((ExitReason::TakeProfit, true, details));
         }
 
         // Check time-based exit
         if self.config.enable_time_exit && self.is_past_exit_time(now) {
-            return Some((ExitReason::AutoExit, true));
+            let et_time = now.with_timezone(&New_York);
+            let details = format!(
+                "Time-based exit at {} ET (threshold: {} ET)",
+                et_time.format("%H:%M:%S"),
+                self.config.auto_exit_time.format("%H:%M:%S")
+            );
+            return Some((ExitReason::AutoExit, true, details));
         }
 
         None
@@ -183,10 +222,10 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
 
-    #[test]
-    fn test_should_exit_stop_loss() {
+    #[tokio::test]
+    async fn test_should_exit_stop_loss() {
         let config = AutoExitConfig::default();
-        let pool = sqlx::PgPool::connect_lazy("postgresql://localhost/test").unwrap();
+        let pool = sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("Failed to create pool");
         let manager = AutoExitManager::new(pool, config);
 
         let trade = PaperTrade {
@@ -212,19 +251,25 @@ mod tests {
             max_favorable_excursion: None,
             max_adverse_excursion: None,
             exit_reason: None,
+            estimated_slippage_pct: Some(0.03),
+            actual_entry_slippage_pct: None,
+            actual_exit_slippage_pct: None,
+            market_vix: Some(15.0),
+            option_moneyness: Some("ATM".to_string()),
         };
 
         // Current price at 1.0 = -50% from entry
         let result = manager.should_exit(&trade, 1.0, Utc::now());
 
         assert!(result.is_some());
-        let (reason, should_exit) = result.unwrap();
+        let (reason, should_exit, details) = result.unwrap();
         assert_eq!(reason, ExitReason::StopLoss);
         assert!(should_exit);
+        assert!(details.contains("Stop-loss"));
     }
 
-    #[test]
-    fn test_should_exit_take_profit() {
+    #[tokio::test]
+    async fn test_should_exit_take_profit() {
         let config = AutoExitConfig::default();
         let pool = sqlx::PgPool::connect_lazy("postgresql://localhost/test").unwrap();
         let manager = AutoExitManager::new(pool, config);
@@ -252,21 +297,27 @@ mod tests {
             max_favorable_excursion: None,
             max_adverse_excursion: None,
             exit_reason: None,
+            estimated_slippage_pct: Some(0.03),
+            actual_entry_slippage_pct: None,
+            actual_exit_slippage_pct: None,
+            market_vix: Some(15.0),
+            option_moneyness: Some("ATM".to_string()),
         };
 
         // Current price at 2.6 = +30% from entry
         let result = manager.should_exit(&trade, 2.6, Utc::now());
 
         assert!(result.is_some());
-        let (reason, should_exit) = result.unwrap();
+        let (reason, should_exit, details) = result.unwrap();
         assert_eq!(reason, ExitReason::TakeProfit);
         assert!(should_exit);
+        assert!(details.contains("Take-profit"));
     }
 
-    #[test]
-    fn test_calculate_trailing_stop() {
+    #[tokio::test]
+    async fn test_calculate_trailing_stop() {
         let config = AutoExitConfig::default();
-        let pool = sqlx::PgPool::connect_lazy("postgresql://localhost/test").unwrap();
+        let pool = sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("Failed to create pool");
         let manager = AutoExitManager::new(pool, config);
 
         let entry = 2.0;
@@ -279,10 +330,10 @@ mod tests {
         assert_eq!(stop, 2.55);
     }
 
-    #[test]
-    fn test_no_exit_conditions_met() {
+    #[tokio::test]
+    async fn test_no_exit_conditions_met() {
         let config = AutoExitConfig::default();
-        let pool = sqlx::PgPool::connect_lazy("postgresql://localhost/test").unwrap();
+        let pool = sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("Failed to create pool");
         let manager = AutoExitManager::new(pool, config);
 
         let trade = PaperTrade {
@@ -308,11 +359,19 @@ mod tests {
             max_favorable_excursion: None,
             max_adverse_excursion: None,
             exit_reason: None,
+            estimated_slippage_pct: Some(0.03),
+            actual_entry_slippage_pct: None,
+            actual_exit_slippage_pct: None,
+            market_vix: Some(15.0),
+            option_moneyness: Some("ATM".to_string()),
         };
 
         // Current price at 2.2 = +10% from entry (not at take-profit yet)
-        // Also current time is early morning (not at exit time yet)
-        let result = manager.should_exit(&trade, 2.2, Utc::now());
+        // Use a specific time that's definitely before 3 PM ET (10 AM ET)
+        let test_time = chrono::DateTime::parse_from_rfc3339("2025-01-06T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = manager.should_exit(&trade, 2.2, test_time);
 
         assert!(result.is_none());
     }

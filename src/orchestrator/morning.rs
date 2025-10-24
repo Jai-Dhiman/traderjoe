@@ -8,7 +8,9 @@ use sqlx::PgPool;
 use tracing::{error, info, warn};
 
 use crate::{
-    ace::{sanitize::validate_trading_decision, ACEPrompts, ContextDAO, PlaybookDAO, TradingDecision},
+    ace::{
+        sanitize::validate_trading_decision, ACEPrompts, ContextDAO, PlaybookDAO, TradingDecision,
+    },
     config::Config,
     data::{MarketDataClient, ResearchClient, SentimentClient},
     embeddings::EmbeddingGemma,
@@ -18,8 +20,8 @@ use crate::{
 
 /// Morning analysis orchestrator
 pub struct MorningOrchestrator {
-    pool: PgPool,
-    config: Config,
+    _pool: PgPool,  // Kept for potential future use
+    _config: Config,  // Kept for potential future use
     market_client: MarketDataClient,
     research_client: ResearchClient,
     sentiment_client: SentimentClient,
@@ -43,7 +45,16 @@ impl MorningOrchestrator {
             config.apis.reddit_client_id.clone(),
             config.apis.reddit_client_secret.clone(),
         );
-        let embedder = EmbeddingGemma::load().await?;
+
+        // Initialize embedder based on available credentials
+        let embedder = if let Some(github_token) = config.apis.github_token.clone() {
+            info!("Using GitHub Models for embeddings (cloud mode)");
+            EmbeddingGemma::from_github_models(github_token).await?
+        } else {
+            info!("No GitHub token found, using local EmbeddingGemma (development mode)");
+            EmbeddingGemma::load().await?
+        };
+
         let vector_store = VectorStore::new(pool.clone()).await?;
         let context_dao = ContextDAO::new(pool.clone());
         let playbook_dao = PlaybookDAO::new(pool.clone());
@@ -57,8 +68,8 @@ impl MorningOrchestrator {
         info!("Morning Orchestrator initialized successfully");
 
         Ok(Self {
-            pool,
-            config,
+            _pool: pool,
+            _config: config,
             market_client,
             research_client,
             sentiment_client,
@@ -78,14 +89,22 @@ impl MorningOrchestrator {
         info!("📊 Fetching market data...");
         let market_data = self.fetch_market_data(symbol).await?;
 
-        // Step 2: Compute ML signals
-        info!("🤖 Computing ML signals...");
+        // Step 2: Compute technical indicators
+        info!("📊 Computing technical indicators...");
         let ml_signals = self.compute_ml_signals(&market_data).await?;
 
         // Step 3: Fetch research and sentiment
         info!("🔍 Gathering research and sentiment...");
         let (research_data, sentiment_data) =
             tokio::try_join!(self.fetch_research(symbol), self.fetch_sentiment(symbol))?;
+
+        // Log research results
+        let research_count = research_data["results"].as_array().map(|r| r.len()).unwrap_or(0);
+        let research_source = research_data["source"].as_str().unwrap_or("unknown");
+        info!("📚 Retrieved {} research results from {}", research_count, research_source);
+
+        // Check for degraded services and alert
+        self.check_service_health(&research_data, &sentiment_data).await;
 
         // Step 4: Build market state representation
         info!("🏗️ Building market state representation...");
@@ -185,11 +204,13 @@ impl MorningOrchestrator {
     }
 
     /// Compute technical indicators from market data
+    /// Note: This calculates RSI, MACD-like signals, volume analysis, and momentum scores
+    /// These are NOT machine learning models, but traditional technical analysis indicators
     async fn compute_ml_signals(&self, market_data: &Value) -> Result<Value> {
         // Extract market data
         let daily_change = market_data["daily_change_pct"].as_f64().unwrap_or(0.0);
         let volatility = market_data["volatility_20d"].as_f64().unwrap_or(0.0);
-        let latest_price = market_data["latest_price"].as_f64().unwrap_or(0.0);
+        let _latest_price = market_data["latest_price"].as_f64().unwrap_or(0.0);
 
         // Calculate simplified technical indicators for quick momentum assessment
         // RSI approximation based on daily change momentum (not standard 14-period RSI)
@@ -257,8 +278,8 @@ impl MorningOrchestrator {
                 "trend": if daily_change > 0.0 { "up" } else { "down" },
                 "strength": daily_change.abs()
             },
-            "ml_confidence": signal_confidence,
-            "signal_summary": format!("{} momentum with {} volume (confidence: {:.1}%)",
+            "indicator_confidence": signal_confidence,
+            "signal_summary": format!("{} momentum with {} volume (technical confidence: {:.1}%)",
                                        if daily_change > 0.0 { "Positive" } else { "Negative" },
                                        volume_signal,
                                        signal_confidence * 100.0)
@@ -268,34 +289,24 @@ impl MorningOrchestrator {
     /// Fetch research data
     async fn fetch_research(&self, symbol: &str) -> Result<Value> {
         let query = format!("{} stock market outlook earnings analysis", symbol);
-        match self.research_client.search(&query).await {
-            Ok(research) => Ok(research),
-            Err(e) => {
-                warn!("Research fetch failed: {}, using fallback", e);
-                Ok(json!({
-                    "query": query,
-                    "results": [],
-                    "source": "fallback",
-                    "message": "Research API unavailable"
-                }))
-            }
-        }
+        self.research_client
+            .search(&query)
+            .await
+            .map_err(|e| {
+                error!("Research fetch failed: {}", e);
+                anyhow::anyhow!("Failed to fetch research data: {}. Ensure Exa API key is configured and service is available.", e)
+            })
     }
 
     /// Fetch sentiment data
     async fn fetch_sentiment(&self, symbol: &str) -> Result<Value> {
-        match self.sentiment_client.analyze_reddit(Some(symbol)).await {
-            Ok(sentiment) => Ok(sentiment),
-            Err(e) => {
-                warn!("Sentiment fetch failed: {}, using neutral sentiment", e);
-                Ok(json!({
-                    "symbol": symbol,
-                    "score": 0.5,
-                    "source": "fallback",
-                    "message": "Sentiment API unavailable"
-                }))
-            }
-        }
+        self.sentiment_client
+            .analyze_reddit(Some(symbol))
+            .await
+            .map_err(|e| {
+                error!("Sentiment fetch failed: {}", e);
+                anyhow::anyhow!("Failed to fetch sentiment data: {}. Ensure Reddit API credentials are configured.", e)
+            })
     }
 
     /// Build comprehensive market state representation
@@ -316,8 +327,9 @@ impl MorningOrchestrator {
             "ml_signals": ml_signals,
             "research_summary": {
                 "source_count": research_data["results"].as_array().map(|r| r.len()).unwrap_or(0),
-                "key_themes": research_data["autoprompt_string"].as_str().unwrap_or("No themes available"),
-                "availability": if research_data["source"] == "fallback" { "limited" } else { "full" }
+                "key_themes": research_data["autoprompt_string"].as_str().unwrap_or("Research data available (no summary generated by API)"),
+                "availability": if research_data["source"] == "fallback" { "limited" } else { "full" },
+                "data_source": research_data["source"].as_str().unwrap_or("unknown")
             },
             "sentiment": {
                 "reddit_score": sentiment_data["score"].as_f64().unwrap_or(0.5),
@@ -391,87 +403,33 @@ impl MorningOrchestrator {
             &Utc::now().format("%Y-%m-%d").to_string(),
         );
 
-        // Try to get structured decision from LLM
-        match self
+        // Get structured decision from LLM - no fallback
+        let decision = self
             .llm_client
             .generate_json::<TradingDecision>(&prompt, None)
             .await
-        {
-            Ok(decision) => {
-                info!(
-                    "LLM generated decision: {} with {:.1}% confidence",
-                    decision.action,
-                    decision.confidence * 100.0
-                );
-
-                // Validate the decision
-                let decision_json = serde_json::to_value(&decision)?;
-                if let Err(validation_error) = validate_trading_decision(&decision_json) {
-                    warn!("LLM decision failed validation: {}", validation_error);
-                    warn!("Using fallback decision instead");
-                    return Ok(self
-                        .generate_fallback_decision(market_state, ml_signals)
-                        .await);
-                }
-
-                info!("Decision passed validation");
-                Ok(decision)
-            }
-            Err(e) => {
+            .map_err(|e| {
                 error!("LLM decision generation failed: {}", e);
-                // Fallback decision based on signals
-                Ok(self
-                    .generate_fallback_decision(market_state, ml_signals)
-                    .await)
-            }
-        }
+                anyhow::anyhow!("Failed to generate trading decision from LLM: {}. Ensure Ollama is running with 'ollama serve' and model is available.", e)
+            })?;
+
+        info!(
+            "LLM generated decision: {} with {:.1}% confidence",
+            decision.action,
+            decision.confidence * 100.0
+        );
+
+        // Validate the decision
+        let decision_json = serde_json::to_value(&decision)?;
+        validate_trading_decision(&decision_json).map_err(|e| {
+            error!("LLM decision failed validation: {}", e);
+            anyhow::anyhow!("LLM generated invalid trading decision: {}. This indicates a problem with the LLM output format.", e)
+        })?;
+
+        info!("Decision passed validation");
+        Ok(decision)
     }
 
-    /// Generate fallback decision when LLM is unavailable
-    async fn generate_fallback_decision(
-        &self,
-        market_state: &Value,
-        ml_signals: &Value,
-    ) -> TradingDecision {
-        let momentum_score = ml_signals["momentum_score"].as_f64().unwrap_or(0.5);
-        let daily_change = market_state["market_data"]["daily_change_pct"]
-            .as_f64()
-            .unwrap_or(0.0);
-        let sentiment_score = market_state["sentiment"]["reddit_score"]
-            .as_f64()
-            .unwrap_or(0.5);
-
-        let action = if momentum_score > 0.6 && daily_change > 0.5 {
-            "BUY_CALLS"
-        } else if momentum_score < 0.4 && daily_change < -0.5 {
-            "BUY_PUTS"
-        } else {
-            "STAY_FLAT"
-        };
-
-        let confidence =
-            ((momentum_score - 0.5).abs() + sentiment_score.max(1.0 - sentiment_score)) / 2.0;
-
-        TradingDecision {
-            action: action.to_string(),
-            confidence: confidence.max(0.1).min(0.9) as f32,
-            reasoning: format!(
-                "Fallback decision based on momentum score {:.2}, daily change {:.2}%, sentiment {:.2}",
-                momentum_score, daily_change, sentiment_score
-            ),
-            key_factors: vec![
-                format!("Momentum: {:.1}%", momentum_score * 100.0),
-                format!("Price change: {:.2}%", daily_change),
-                format!("Sentiment: {:.2}", sentiment_score)
-            ],
-            risk_factors: vec![
-                "LLM unavailable - using simplified logic".to_string(),
-                "Limited market analysis".to_string()
-            ],
-            similar_pattern_reference: None,
-            position_size_multiplier: 0.5, // Reduced size for fallback
-        }
-    }
 
     /// Display analysis results to user
     async fn display_analysis_results(
@@ -576,12 +534,12 @@ impl MorningOrchestrator {
         } else {
             "limited"
         };
-        let research_quality = if research_data["source"] != "fallback" {
+        let research_quality = if research_data["results"].as_array().map(|r| !r.is_empty()).unwrap_or(false) {
             "good"
         } else {
             "limited"
         };
-        let sentiment_quality = if sentiment_data["source"] != "fallback" {
+        let sentiment_quality = if sentiment_data.get("score").is_some() {
             "good"
         } else {
             "limited"
@@ -597,5 +555,48 @@ impl MorningOrchestrator {
                 "limited"
             }
         })
+    }
+
+    /// Check service health and alert on degraded services
+    /// This detects when external APIs are using fallback mode
+    async fn check_service_health(&self, research_data: &Value, sentiment_data: &Value) {
+        let mut degraded_services = Vec::new();
+
+        // Check if research is using fallback
+        if research_data["source"].as_str() == Some("fallback") {
+            warn!("⚠️  DEGRADED SERVICE: Research API (Exa) is unavailable - using fallback data");
+            degraded_services.push("Research/Exa");
+        }
+
+        // Check if sentiment is using fallback
+        if sentiment_data["source"].as_str() == Some("reddit")
+            && sentiment_data["note"].as_str().map(|s| s.contains("not configured")).unwrap_or(false) {
+            warn!("⚠️  DEGRADED SERVICE: Reddit API is unavailable - using fallback data");
+            degraded_services.push("Reddit Sentiment");
+        }
+
+        // If any services are degraded, emit a consolidated warning
+        if !degraded_services.is_empty() {
+            error!(
+                degraded_services = ?degraded_services,
+                "❌ SYSTEM HEALTH WARNING: {} external service(s) degraded - {}. Trading decisions may be less reliable. Check API credentials in .env file.",
+                degraded_services.len(),
+                degraded_services.join(", ")
+            );
+
+            // Also print to stdout so user sees it in the terminal
+            eprintln!("\n╔════════════════════════════════════════════════════════════╗");
+            eprintln!("║          ⚠️  SYSTEM HEALTH WARNING ⚠️                      ║");
+            eprintln!("╚════════════════════════════════════════════════════════════╝");
+            eprintln!("The following external services are degraded:");
+            for service in &degraded_services {
+                eprintln!("  ❌ {}", service);
+            }
+            eprintln!("\nImpact: Trading decisions will rely on limited data.");
+            eprintln!("Action: Check your .env file and verify API credentials.");
+            eprintln!("═══════════════════════════════════════════════════════════\n");
+        } else {
+            info!("✅ All external services healthy (Research, Sentiment)");
+        }
     }
 }

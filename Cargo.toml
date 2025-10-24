@@ -15,8 +15,9 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-retry = "0.3"
 
 # Database
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "migrate", "uuid", "chrono", "json"] }
+sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "migrate", "uuid", "chrono", "json", "bigdecimal"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
+bigdecimal = "0.3"
 
 # CLI Framework
 clap = { version = "4.0", features = ["derive", "env"] }
@@ -38,8 +39,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 
 # LLM Integration
-ollama-rs = "0.1"
-async-openai = "0.24"
+ollama-rs = "0.2"
 
 # ML Models (Local) - Use newer versions
 candle-core = "0.9"
@@ -48,8 +48,8 @@ candle-transformers = "0.9"
 hf-hub = "0.4"
 tokenizers = "0.22"
 
-# Python Interop - optional
-pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+# Python Interop - for ML models and embeddings
+pyo3 = { version = "0.22", features = ["auto-initialize"] }
 
 # Logging & Tracing
 tracing = "0.1"
@@ -76,6 +76,7 @@ futures = "0.3"
 lazy_static = "1.4"
 regex = "1.10"
 sysinfo = "0.30"
+async-openai = { version = "0.30.1", features = ["rustls"] }
 
 # Development Dependencies
 [dev-dependencies]
@@ -97,8 +98,8 @@ name = "traderjoe"
 path = "src/main.rs"
 
 [features]
-default = []
-ml = ["pyo3"]
+default = ["ml"]
+ml = []
 
 [profile.release]
 lto = true

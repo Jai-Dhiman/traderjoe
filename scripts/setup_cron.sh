@@ -46,8 +46,9 @@ CURRENT_CRON=$($CRON_CMD -l 2>/dev/null || echo "")
 FILTERED_CRON=$(echo "$CURRENT_CRON" | grep -v "traderjoe" || true)
 
 # Create new crontab with TraderJoe jobs
-# PST timezone: 6:00 AM PST = 9:00 AM ET, 2:00 PM PST = 5:00 PM ET
+# PST timezone: 6:00 AM PST = 9:00 AM ET, 12:00 PM PST = 3:00 PM ET, 2:00 PM PST = 5:00 PM ET
 # 6:00 AM PST - Morning routine (before market open at 9:30 AM ET / 6:30 AM PST)
+# 12:00 PM PST - Auto-exit routine (3:00 PM ET - time-based exit)
 # 2:00 PM PST - Evening routine (after market close at 4:00 PM ET / 1:00 PM PST)
 
 NEW_CRON="$FILTERED_CRON
@@ -55,6 +56,9 @@ NEW_CRON="$FILTERED_CRON
 # TraderJoe Automated Paper Trading (PST timezone)
 # Morning routine: 6:00 AM PST (9:00 AM ET)
 0 6 * * 1-5 cd $PROJECT_ROOT && $SCRIPT_DIR/morning_routine.sh >> $LOG_DIR/morning_\$(date +\%Y\%m\%d).log 2>&1
+
+# Auto-exit routine: 12:00 PM PST (3:00 PM ET)
+0 12 * * 1-5 cd $PROJECT_ROOT && $SCRIPT_DIR/auto_exit.sh >> $LOG_DIR/auto_exit_\$(date +\%Y\%m\%d).log 2>&1
 
 # Evening routine: 2:00 PM PST (5:00 PM ET)
 0 14 * * 1-5 cd $PROJECT_ROOT && $SCRIPT_DIR/evening_routine.sh >> $LOG_DIR/evening_\$(date +\%Y\%m\%d).log 2>&1
@@ -76,6 +80,7 @@ echo -e "${BLUE}Important Notes:${NC}"
 echo -e "${YELLOW}1. Time Zone:${NC}"
 echo -e "   Configured for PST timezone:"
 echo -e "   • Morning: 6:00 AM PST (9:00 AM ET - before market open)"
+echo -e "   • Auto-Exit: 12:00 PM PST (3:00 PM ET - position exit time)"
 echo -e "   • Evening: 2:00 PM PST (5:00 PM ET - after market close)\n"
 
 echo -e "${YELLOW}2. Database Connection:${NC}"
@@ -91,11 +96,13 @@ echo -e "   • API keys (EXA_API_KEY, etc.)\n"
 echo -e "${YELLOW}4. Logs:${NC}"
 echo -e "   Daily logs are stored in: ${GREEN}$LOG_DIR/${NC}"
 echo -e "   • morning_YYYYMMDD.log"
+echo -e "   • auto_exit_YYYYMMDD.log"
 echo -e "   • evening_YYYYMMDD.log\n"
 
 echo -e "${YELLOW}5. Manual Execution:${NC}"
 echo -e "   You can still run manually with:"
 echo -e "   ${GREEN}$SCRIPT_DIR/morning_routine.sh${NC}"
+echo -e "   ${GREEN}$SCRIPT_DIR/auto_exit.sh${NC}"
 echo -e "   ${GREEN}$SCRIPT_DIR/evening_routine.sh${NC}\n"
 
 echo -e "${YELLOW}6. Trade Execution:${NC}"

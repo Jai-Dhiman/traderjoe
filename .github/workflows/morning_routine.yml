@@ -1,0 +1,152 @@
+name: Morning Trading Routine
+
+on:
+  schedule:
+    # Run at 6:30 AM PST (9:30 AM ET) on weekdays
+    # PST is UTC-8, so 6:30 AM PST = 14:30 UTC (2:30 PM UTC)
+    - cron: '30 14 * * 1-5'
+  workflow_dispatch: # Allow manual trigger for testing
+
+env:
+  RUST_BACKTRACE: 1
+  RUST_LOG: traderjoe=info,sqlx=warn
+
+jobs:
+  morning_analysis:
+    runs-on: ubuntu-latest
+    # Only run on weekdays during market hours
+    if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build TraderJoe
+        env:
+          SQLX_OFFLINE: true
+        run: cargo build --release
+
+      - name: Run Database Migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ./target/release/traderjoe migrate
+
+      - name: Fetch Latest Market Data
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+        run: |
+          echo "Fetching market data for SPY..."
+          ./target/release/traderjoe fetch --symbol SPY --data-type ohlcv --days 5
+
+      - name: Run Morning Analysis (ACE Pipeline)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          PAPER_TRADING: true
+        run: |
+          echo "Running morning analysis..."
+          OUTPUT=$(./target/release/traderjoe analyze --symbol SPY 2>&1)
+          echo "$OUTPUT"
+
+          # Save full output to file for next step
+          echo "$OUTPUT" > /tmp/analysis_output.txt
+
+      - name: Auto-Execute Trade if Confidence Threshold Met
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAPER_TRADING: true
+        run: |
+          echo "Checking auto-execution criteria..."
+
+          # Confidence threshold (0.50 for learning phase)
+          CONFIDENCE_THRESHOLD=0.50
+
+          # Extract recommendation ID
+          RECOMMENDATION_ID=$(cat /tmp/analysis_output.txt | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+
+          if [[ -n "$RECOMMENDATION_ID" ]]; then
+            echo "Found recommendation ID: $RECOMMENDATION_ID"
+
+            # Extract confidence
+            CONFIDENCE=$(cat /tmp/analysis_output.txt | grep -i "confidence" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
+
+            if [[ -n "$CONFIDENCE" ]]; then
+              # Convert percentage to decimal if needed
+              if (( $(echo "$CONFIDENCE > 1" | bc -l) )); then
+                CONFIDENCE=$(echo "scale=2; $CONFIDENCE / 100" | bc)
+              fi
+
+              echo "Confidence: $CONFIDENCE (threshold: $CONFIDENCE_THRESHOLD)"
+
+              # Execute if confidence meets threshold
+              if (( $(echo "$CONFIDENCE >= $CONFIDENCE_THRESHOLD" | bc -l) )); then
+                echo "Confidence meets threshold - AUTO-EXECUTING TRADE"
+                echo "(Paper trading mode - no real money at risk)"
+                ./target/release/traderjoe execute --recommendation-id "$RECOMMENDATION_ID"
+              else
+                echo "Confidence below threshold - SKIPPING execution"
+              fi
+            else
+              echo "Could not parse confidence - SKIPPING execution"
+            fi
+          else
+            echo "No recommendation ID found - SKIPPING execution"
+          fi
+
+      - name: Display Account Status
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          echo "Current positions:"
+          ./target/release/traderjoe positions
+
+      - name: Display ACE Playbook Stats
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "ACE Playbook statistics:"
+          ./target/release/traderjoe playbook-stats
+
+      - name: Upload Analysis Logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: morning-analysis-logs-${{ github.run_number }}
+          path: /tmp/analysis_output.txt
+          retention-days: 30

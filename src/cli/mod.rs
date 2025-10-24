@@ -135,6 +135,24 @@ pub enum Commands {
 
     /// Review all pending contexts
     ReviewAll,
+
+    /// Close an open position manually
+    Close {
+        /// Trade ID to close
+        #[arg(short, long)]
+        trade_id: Uuid,
+
+        /// Exit reason (optional note)
+        #[arg(short, long)]
+        reason: Option<String>,
+    },
+
+    /// Run auto-exit checks for open positions
+    AutoExit {
+        /// Custom auto-exit time (e.g., "15:00" for 3:00 PM ET)
+        #[arg(short = 't', long)]
+        exit_time: Option<String>,
+    },
 }
 
 /// Execute CLI command with database pool
@@ -195,6 +213,14 @@ pub async fn run(cli: Cli, pool: PgPool) -> Result<()> {
         Commands::ReviewAll => {
             info!("Running batch review for all pending contexts");
             commands::review_all(pool).await?;
+        }
+        Commands::Close { trade_id, reason } => {
+            info!("Closing position {}", trade_id);
+            commands::close(pool, trade_id, reason).await?;
+        }
+        Commands::AutoExit { exit_time } => {
+            info!("Running auto-exit checks");
+            commands::auto_exit(pool, exit_time).await?;
         }
     }
     Ok(())

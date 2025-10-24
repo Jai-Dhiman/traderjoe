@@ -39,10 +39,10 @@ pub struct ReflectionResult {
 pub struct ACEPrompts;
 
 impl ACEPrompts {
-    /// Generate morning decision prompt with context and ML signals
+    /// Generate morning decision prompt with context and technical indicators
     pub fn morning_decision_prompt(
         market_state: &Value,
-        ml_signals: &Value,
+        ml_signals: &Value,  // Named ml_signals for backward compatibility, but contains technical indicators
         similar_contexts: &[crate::vector::ContextEntry],
         playbook_entries: &[String],
         current_date: &str,
@@ -58,7 +58,7 @@ impl ACEPrompts {
                     ctx.reasoning,
                     ctx.confidence,
                     ctx.outcome.as_ref()
-                        .map(|o| format!("Success"))
+                        .map(|_o| format!("Success"))
                         .unwrap_or("Pending".to_string()),
                     ctx.similarity.unwrap_or(0.0)
                 )
@@ -81,7 +81,7 @@ CURRENT DATE: {}
 MARKET STATE:
 {}
 
-ML MODEL SIGNALS:
+TECHNICAL INDICATORS:
 {}
 
 SIMILAR PAST CONTEXTS (Top {} most relevant):
@@ -105,11 +105,11 @@ Your response must be valid JSON matching this exact format:
 }}
 
 REASONING PROCESS:
-1. Analyze what the ML models agree/disagree on
+1. Analyze what the technical indicators suggest about momentum and trend
 2. Compare to similar past situations - what worked before?
 3. Consider current market regime and sentiment
 4. Identify key risk factors that could invalidate the thesis
-5. Determine confidence based on pattern strength and agreement
+5. Determine confidence based on pattern strength and indicator alignment
 
 RULES:
 - Only trade if confidence > 0.6
@@ -118,10 +118,13 @@ RULES:
 - Be explicit about why this setup is attractive or unattractive
 - Reference specific playbook entries when applicable
 
-Focus on finding high-probability setups with favorable risk/reward rather than forcing trades."#,
+CRITICAL: Do NOT mention "fallback", "limited data", or "research availability" in your response.
+Base decisions ONLY on the technical indicators, price movement, and sentiment shown above.
+
+Focus on high-probability setups with favorable risk/reward rather than forcing trades."#,
             current_date,
             serde_json::to_string_pretty(market_state).unwrap_or("No market data".to_string()),
-            serde_json::to_string_pretty(ml_signals).unwrap_or("No ML signals".to_string()),
+            serde_json::to_string_pretty(ml_signals).unwrap_or("No technical indicators".to_string()),
             similar_contexts.len(),
             similar_contexts_text,
             if playbook_entries.is_empty() {
@@ -170,7 +173,7 @@ Analyze what happened today and extract learnings for the playbook. Respond with
 
 REFLECTION QUESTIONS:
 1. Was the market regime assessment correct?
-2. Did the ML signals provide accurate guidance?
+2. Did the technical indicators provide accurate guidance?
 3. Were the identified risk factors the right ones to watch?
 4. What unexpected factors emerged?
 5. How should confidence be calibrated for similar setups?

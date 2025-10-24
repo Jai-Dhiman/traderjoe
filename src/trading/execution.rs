@@ -113,11 +113,7 @@ pub fn calculate_dynamic_slippage(params: &DynamicSlippageParams) -> f64 {
 /// For sells: market price - slippage (receiving less)
 ///
 /// Returns 0.0 if market_price is not finite
-pub fn calculate_fill_price(
-    market_price: f64,
-    side: OrderSide,
-    params: &ExecutionParams,
-) -> f64 {
+pub fn calculate_fill_price(market_price: f64, side: OrderSide, params: &ExecutionParams) -> f64 {
     // Validate inputs
     if !market_price.is_finite() || market_price <= 0.0 {
         return 0.0;
@@ -224,10 +220,10 @@ pub fn is_market_open(now: DateTime<Utc>, params: &ExecutionParams) -> bool {
 pub fn is_pre_market(now: DateTime<Utc>) -> bool {
     let et_time = now.with_timezone(&New_York);
     let current_time = et_time.time();
-    let pre_market_start = NaiveTime::from_hms_opt(9, 0, 0)
-        .expect("Invalid hardcoded time 9:00:00 - this is a bug");
-    let market_open = NaiveTime::from_hms_opt(9, 30, 0)
-        .expect("Invalid hardcoded time 9:30:00 - this is a bug");
+    let pre_market_start =
+        NaiveTime::from_hms_opt(9, 0, 0).expect("Invalid hardcoded time 9:00:00 - this is a bug");
+    let market_open =
+        NaiveTime::from_hms_opt(9, 30, 0).expect("Invalid hardcoded time 9:30:00 - this is a bug");
 
     current_time >= pre_market_start && current_time < market_open
 }
@@ -236,10 +232,10 @@ pub fn is_pre_market(now: DateTime<Utc>) -> bool {
 pub fn is_after_hours(now: DateTime<Utc>) -> bool {
     let et_time = now.with_timezone(&New_York);
     let current_time = et_time.time();
-    let market_close = NaiveTime::from_hms_opt(16, 0, 0)
-        .expect("Invalid hardcoded time 16:00:00 - this is a bug");
-    let after_hours_end = NaiveTime::from_hms_opt(20, 0, 0)
-        .expect("Invalid hardcoded time 20:00:00 - this is a bug");
+    let market_close =
+        NaiveTime::from_hms_opt(16, 0, 0).expect("Invalid hardcoded time 16:00:00 - this is a bug");
+    let after_hours_end =
+        NaiveTime::from_hms_opt(20, 0, 0).expect("Invalid hardcoded time 20:00:00 - this is a bug");
 
     current_time >= market_close && current_time < after_hours_end
 }
@@ -253,7 +249,8 @@ pub fn validate_execution(
 ) -> Result<()> {
     // Check market hours
     if !is_market_open(now, params) {
-        bail!("Market is closed. Trading hours: {:?} - {:?} ET",
+        bail!(
+            "Market is closed. Trading hours: {:?} - {:?} ET",
             params.market_open,
             params.market_close
         );
@@ -399,7 +396,10 @@ mod tests {
 
         let result = validate_execution(-1.0, 1.0, now, &params);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid market price"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid market price"));
     }
 
     #[test]
@@ -412,20 +412,35 @@ mod tests {
 
         let result = validate_execution(100.0, -1.0, now, &params);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid share count"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid share count"));
     }
 
     #[test]
     fn test_is_market_holiday() {
         // Test 2025 holidays
-        assert!(is_market_holiday(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())); // New Year's
-        assert!(is_market_holiday(NaiveDate::from_ymd_opt(2025, 1, 20).unwrap())); // MLK Day
-        assert!(is_market_holiday(NaiveDate::from_ymd_opt(2025, 7, 4).unwrap())); // July 4th
-        assert!(is_market_holiday(NaiveDate::from_ymd_opt(2025, 12, 25).unwrap())); // Christmas
+        assert!(is_market_holiday(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
+        )); // New Year's
+        assert!(is_market_holiday(
+            NaiveDate::from_ymd_opt(2025, 1, 20).unwrap()
+        )); // MLK Day
+        assert!(is_market_holiday(
+            NaiveDate::from_ymd_opt(2025, 7, 4).unwrap()
+        )); // July 4th
+        assert!(is_market_holiday(
+            NaiveDate::from_ymd_opt(2025, 12, 25).unwrap()
+        )); // Christmas
 
         // Test non-holidays
-        assert!(!is_market_holiday(NaiveDate::from_ymd_opt(2025, 1, 2).unwrap()));
-        assert!(!is_market_holiday(NaiveDate::from_ymd_opt(2025, 3, 15).unwrap()));
+        assert!(!is_market_holiday(
+            NaiveDate::from_ymd_opt(2025, 1, 2).unwrap()
+        ));
+        assert!(!is_market_holiday(
+            NaiveDate::from_ymd_opt(2025, 3, 15).unwrap()
+        ));
     }
 
     #[test]

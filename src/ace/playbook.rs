@@ -194,10 +194,24 @@ impl PlaybookDAO {
         harmful_delta: i32,
         confidence_adjustment: f32,
     ) -> Result<bool> {
+        // First, get the current values for detailed logging
+        let before = sqlx::query!(
+            r#"
+            SELECT content, helpful_count, harmful_count, confidence
+            FROM playbook_bullets
+            WHERE id = $1
+            "#,
+            bullet_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to fetch bullet before update")?;
+
+        // Perform the update
         let result = sqlx::query!(
             r#"
-            UPDATE playbook_bullets 
-            SET 
+            UPDATE playbook_bullets
+            SET
                 helpful_count = helpful_count + $2,
                 harmful_count = harmful_count + $3,
                 confidence = GREATEST(0.01, LEAST(0.99, confidence + $4))
@@ -214,10 +228,32 @@ impl PlaybookDAO {
 
         let updated = result.rows_affected() > 0;
         if updated {
-            debug!(
-                "Updated counters for bullet {}: +{} helpful, +{} harmful, {:+.3} confidence",
-                bullet_id, helpful_delta, harmful_delta, confidence_adjustment
-            );
+            if let Some(before_state) = before {
+                let old_conf = before_state.confidence as f32;
+                let new_conf = (old_conf + confidence_adjustment).clamp(0.01, 0.99);
+                let old_helpful = before_state.helpful_count;
+                let old_harmful = before_state.harmful_count;
+                let content_preview = before_state.content.chars().take(60).collect::<String>();
+
+                info!(
+                    bullet_id = %bullet_id,
+                    old_confidence = %format!("{:.3}", old_conf),
+                    new_confidence = %format!("{:.3}", new_conf),
+                    delta = %format!("{:+.3}", confidence_adjustment),
+                    helpful = %format!("{} → {}", old_helpful, old_helpful + helpful_delta),
+                    harmful = %format!("{} → {}", old_harmful, old_harmful + harmful_delta),
+                    "📊 PLAYBOOK UPDATE: \"{}\" | Confidence: {:.3} → {:.3} ({:+.3})",
+                    content_preview,
+                    old_conf,
+                    new_conf,
+                    new_conf - old_conf
+                );
+            } else {
+                debug!(
+                    "Updated counters for bullet {}: +{} helpful, +{} harmful, {:+.3} confidence",
+                    bullet_id, helpful_delta, harmful_delta, confidence_adjustment
+                );
+            }
         } else {
             warn!("No bullet found with id {} to update counters", bullet_id);
         }
@@ -546,7 +582,7 @@ impl PlaybookDAO {
         if let Some(sections) = &filters.sections {
             let section_strs: Vec<String> = sections
                 .iter()
-                .map(|s| {
+                .map(|_s| {
                     format!("${}", {
                         param_count += 1;
                         param_count - 1

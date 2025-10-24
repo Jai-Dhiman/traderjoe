@@ -83,11 +83,22 @@ impl TradingOutcome {
     pub fn outcome_severity(&self) -> f32 {
         // Scale severity based on P&L percentage
         let abs_pnl = self.pnl_pct.abs();
+
+        // Special handling for STAY_FLAT decisions (0% P&L)
+        // These decisions need meaningful confidence updates even with no P&L
+        if abs_pnl < 0.01 {
+            // For flat trades, use fixed moderate severity
+            // This ensures playbook bullets get meaningful updates
+            // Without this, 0% P&L would result in tiny 0.01 adjustments
+            return 0.05; // 5% confidence adjustment per vote
+        }
+
+        // For actual trades, scale by P&L magnitude
         match abs_pnl {
-            x if x > 50.0 => 0.10, // Large moves
-            x if x > 20.0 => 0.05, // Medium moves
-            x if x > 5.0 => 0.02,  // Small moves
-            _ => 0.01,             // Minimal moves
+            x if x > 50.0 => 0.15, // Large moves (50%+)
+            x if x > 20.0 => 0.10, // Medium moves (20-50%)
+            x if x > 5.0 => 0.05,  // Small moves (5-20%)
+            _ => 0.02,             // Minimal moves (< 5%)
         }
     }
 }
@@ -468,14 +479,25 @@ mod tests {
 
     #[test]
     fn test_outcome_severity() {
+        // STAY_FLAT decision (0% P&L) - critical for playbook learning
+        let stay_flat = TradingOutcome::from_pnl(100.0, 100.0, 0.0, 0.0);
+        assert_eq!(stay_flat.outcome_severity(), 0.05); // Fixed 5% for STAY_FLAT
+
+        // Small moves (< 5%)
         let small_win = TradingOutcome::from_pnl(100.0, 102.0, 20.0, 1.0);
-        assert_eq!(small_win.outcome_severity(), 0.01); // 2% gain
+        assert_eq!(small_win.outcome_severity(), 0.02); // 2% gain
 
+        // Medium moves (5-20%)
         let medium_loss = TradingOutcome::from_pnl(100.0, 85.0, -150.0, 3.0);
-        assert_eq!(medium_loss.outcome_severity(), 0.02); // 15% loss (between 5-20%)
+        assert_eq!(medium_loss.outcome_severity(), 0.05); // 15% loss
 
-        let large_win = TradingOutcome::from_pnl(100.0, 160.0, 600.0, 4.0);
-        assert_eq!(large_win.outcome_severity(), 0.10); // 60% gain
+        // Large moves (20-50%)
+        let large_loss = TradingOutcome::from_pnl(100.0, 75.0, -250.0, 3.0);
+        assert_eq!(large_loss.outcome_severity(), 0.10); // 25% loss
+
+        // Very large moves (50%+)
+        let very_large_win = TradingOutcome::from_pnl(100.0, 160.0, 600.0, 4.0);
+        assert_eq!(very_large_win.outcome_severity(), 0.15); // 60% gain
     }
 
     #[tokio::test]

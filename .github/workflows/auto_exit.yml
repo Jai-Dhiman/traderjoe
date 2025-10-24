@@ -1,0 +1,82 @@
+name: Auto-Exit Routine
+
+on:
+  schedule:
+    # Run at 12:00 PM PST (3:00 PM ET) on weekdays
+    # PST is UTC-8, so 12:00 PM PST = 20:00 UTC (8:00 PM UTC)
+    - cron: '0 20 * * 1-5'
+  workflow_dispatch: # Allow manual trigger for testing
+
+env:
+  RUST_BACKTRACE: 1
+  RUST_LOG: traderjoe=info,sqlx=warn
+
+jobs:
+  auto_exit:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build TraderJoe
+        env:
+          SQLX_OFFLINE: true
+        run: cargo build --release
+
+      - name: Check Current Positions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          echo "Checking open positions..."
+          ./target/release/traderjoe positions
+
+      - name: Run Auto-Exit Checks
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          PAPER_TRADING: true
+        run: |
+          echo "Running auto-exit checks..."
+          echo "Checking stop-loss, take-profit, and time-based exits"
+          ./target/release/traderjoe auto-exit
+
+      - name: Display Updated Positions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          echo "Updated positions after auto-exit:"
+          ./target/release/traderjoe positions
+
+      - name: Summary
+        run: |
+          echo "Auto-Exit Check Complete!"
+          echo ""
+          echo "Exit Criteria:"
+          echo "  • Time-based: 3:00 PM ET"
+          echo "  • Stop-loss: -50% from entry"
+          echo "  • Take-profit: +30% from entry"
+          echo "  • All criteria checked automatically"

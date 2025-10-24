@@ -26,6 +26,14 @@ fn test_technical_indicators_computation() {
 
     let signals = compute_indicators(&data);
 
+    // Debug output
+    println!("RSI: {:?}", signals.rsi_14);
+    println!("MACD: {:?}", signals.macd);
+    println!("SMA 20: {:?}", signals.sma_20);
+    println!("SMA 50: {:?}", signals.sma_50);
+    println!("Signal: {:?}", signals.signal);
+    println!("Confidence: {:.2}", signals.confidence);
+
     // Assertions
     assert!(signals.rsi_14.is_some(), "RSI should be computed");
     assert!(signals.sma_20.is_some(), "SMA 20 should be computed");
