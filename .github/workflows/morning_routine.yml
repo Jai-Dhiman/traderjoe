@@ -145,7 +145,7 @@ jobs:
 
       - name: Upload Analysis Logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: morning-analysis-logs-${{ github.run_number }}
           path: /tmp/analysis_output.txt
