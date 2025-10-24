@@ -20,9 +20,11 @@ impl Database {
             .idle_timeout(std::time::Duration::from_secs(300))
             // Connection lifetime to handle network issues
             .max_lifetime(std::time::Duration::from_secs(1800))
+            // Test connection on acquire to detect stale connections
+            .test_before_acquire(true)
             .connect(database_url)
             .await
-            .context("Failed to connect to PostgreSQL database")?;
+            .context("Failed to connect to PostgreSQL database. Check that DATABASE_URL is set correctly and Supabase is accessible.")?;
 
         info!("Database connection established successfully");
         Ok(Database { pool })

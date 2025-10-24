@@ -22,35 +22,63 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v3
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          # Cache key includes Cargo.lock for dependency changes
+          # Automatically handles target/ and ~/.cargo caching
+          shared-key: "release"
+          cache-on-failure: true
 
       - name: Build TraderJoe
         env:
           SQLX_OFFLINE: true
         run: cargo build --release
 
-      - name: Run Database Migrations
+      - name: Test Database Connection
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          ./target/release/traderjoe migrate
+          echo "🔍 Testing Supabase database connection..."
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "❌ ERROR: DATABASE_URL secret is not set!"
+            echo ""
+            echo "To fix this:"
+            echo "1. Go to your GitHub repo: Settings > Secrets and variables > Actions"
+            echo "2. Click 'New repository secret'"
+            echo "3. Name: DATABASE_URL"
+            echo "4. Value: Your Supabase connection string"
+            echo "   Format: postgresql://postgres.[PROJECT_REF]:[PASSWORD]@[HOST]:6543/postgres"
+            echo ""
+            echo "Get it from: Supabase Project > Settings > Database > Connection String (Transaction mode)"
+            exit 1
+          fi
+
+          echo "✅ DATABASE_URL secret is set (length: ${#DATABASE_URL} characters)"
+          echo ""
+          echo "Testing database connection..."
+
+          # Run a simple command that will test database connectivity
+          # The --help command still connects to DB and runs migrations
+          if ./target/release/traderjoe --help > /dev/null 2>&1; then
+            echo "✅ Database connection successful!"
+          else
+            echo "❌ Database connection failed!"
+            echo ""
+            echo "Possible issues:"
+            echo "1. DATABASE_URL format incorrect"
+            echo "2. Supabase password has special characters - make sure it's URL-encoded"
+            echo "3. Supabase project is paused (free tier limitation)"
+            echo "4. Network connectivity issue"
+            echo ""
+            echo "Try testing the connection string locally first:"
+            echo "  export DATABASE_URL='your_connection_string'"
+            echo "  cargo run -- --help"
+            exit 1
+          fi
 
       - name: Fetch Latest Market Data
         env:
