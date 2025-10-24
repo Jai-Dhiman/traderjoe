@@ -53,30 +53,68 @@ jobs:
             echo "4. Value: Your Supabase connection string"
             echo "   Format: postgresql://postgres.[PROJECT_REF]:[PASSWORD]@[HOST]:6543/postgres"
             echo ""
-            echo "Get it from: Supabase Project > Settings > Database > Connection String (Transaction mode)"
+            echo "Get it from: Supabase Project > Settings > Database > Connection String (Session mode)"
             exit 1
           fi
 
           echo "✅ DATABASE_URL secret is set (length: ${#DATABASE_URL} characters)"
           echo ""
-          echo "Testing database connection..."
 
-          # Run a simple command that will test database connectivity
-          # The --help command still connects to DB and runs migrations
-          if ./target/release/traderjoe --help > /dev/null 2>&1; then
+          # Extract host from DATABASE_URL for network testing
+          DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^:]+):.*|\1|')
+          DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
+
+          echo "📡 Network diagnostics:"
+          echo "Host: $DB_HOST"
+          echo "Port: $DB_PORT"
+          echo ""
+
+          # Check if we can reach the host
+          echo "Testing network connectivity to Supabase..."
+          if timeout 10 bash -c "cat < /dev/null > /dev/tcp/$DB_HOST/$DB_PORT" 2>/dev/null; then
+            echo "✅ Network connection to $DB_HOST:$DB_PORT successful"
+          else
+            echo "⚠️  Cannot establish TCP connection to $DB_HOST:$DB_PORT"
+            echo "This might indicate:"
+            echo "  - Supabase firewall blocking GitHub Actions IPs"
+            echo "  - Project paused (free tier limitation)"
+            echo "  - Wrong host or port"
+          fi
+          echo ""
+
+          # Check which port is being used
+          if [[ "$DB_PORT" == "5432" ]]; then
+            echo "⚠️  WARNING: Using port 5432 (direct connection)"
+            echo "For GitHub Actions, Supabase recommends port 6543 (connection pooler)"
+            echo "Update your DATABASE_URL secret to use port 6543 for better reliability"
+            echo ""
+          fi
+
+          echo "Testing database connection with actual error output..."
+          echo "Running: ./target/release/traderjoe --help"
+          echo "----------------------------------------"
+
+          # Run the command and capture full output
+          if ./target/release/traderjoe --help 2>&1; then
+            echo "----------------------------------------"
             echo "✅ Database connection successful!"
           else
-            echo "❌ Database connection failed!"
+            EXIT_CODE=$?
+            echo "----------------------------------------"
+            echo "❌ Database connection failed with exit code: $EXIT_CODE"
             echo ""
-            echo "Possible issues:"
-            echo "1. DATABASE_URL format incorrect"
-            echo "2. Supabase password has special characters - make sure it's URL-encoded"
-            echo "3. Supabase project is paused (free tier limitation)"
-            echo "4. Network connectivity issue"
+            echo "Common fixes:"
+            echo "1. Use port 6543 (connection pooler) instead of 5432"
+            echo "   Format: postgresql://postgres:[PASSWORD]@[HOST]:6543/postgres"
             echo ""
-            echo "Try testing the connection string locally first:"
-            echo "  export DATABASE_URL='your_connection_string'"
-            echo "  cargo run -- --help"
+            echo "2. Check Supabase Project Settings:"
+            echo "   - Database > Connection Pooling: Ensure it's enabled"
+            echo "   - Database > Settings: Check if IPv4 Add-on is enabled (if on free tier)"
+            echo "   - Project Settings: Ensure project is not paused"
+            echo ""
+            echo "3. URL-encode special characters in password if any"
+            echo ""
+            echo "4. For GitHub Actions, use 'Session' mode connection string from Supabase"
             exit 1
           fi
 
