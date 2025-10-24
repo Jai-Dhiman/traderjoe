@@ -15,10 +15,12 @@ impl Database {
         let connect_options = PgConnectOptions::from_str(database_url)
             .context("Failed to parse DATABASE_URL")?
             // Disable statement caching for memory efficiency
-            // For Supabase: Use Session mode pooler (port 5432 on pooler.supabase.com)
-            // - Session mode: port 5432 - supports prepared statements (required for migrations)
-            // - Transaction mode: port 6543 - does NOT support prepared statements
-            // Requires sqlx 0.8+ for SASL authentication fix with Session mode
+            // For Supabase in CI/CD (GitHub Actions):
+            //   - Use DIRECT connection: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres
+            //   - Supabase poolers have SASL authentication issues with sqlx
+            // For local development:
+            //   - Can use pooler Session mode if needed
+            //   - Or use direct connection (more reliable)
             .statement_cache_capacity(0);
 
         let pool = PgPoolOptions::new()

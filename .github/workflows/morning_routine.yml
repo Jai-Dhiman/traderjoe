@@ -82,22 +82,26 @@ jobs:
           fi
           echo ""
 
-          # Check which port is being used
+          # Check which port and host is being used
           if [[ "$DB_PORT" == "5432" ]]; then
             if [[ "$DB_HOST" == *"pooler.supabase.com"* ]]; then
-              echo "✅ Using port 5432 on pooler (Session mode) - correct for sqlx 0.8+"
+              echo "⚠️  Using port 5432 on pooler (Session mode)"
+              echo ""
+              echo "Known issue: Supabase Session pooler has SASL auth issues with sqlx"
+              echo "Recommendation: Use direct connection for GitHub Actions"
+              echo "  Supabase → Settings → Database → Connection String → Direct connection"
+              echo "  Format: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres"
               echo ""
             else
-              echo "⚠️  Using port 5432 on direct connection (not pooled)"
-              echo "For better reliability, use the pooler with Session mode"
+              echo "✅ Using port 5432 on direct connection - recommended for GitHub Actions"
               echo ""
             fi
           elif [[ "$DB_PORT" == "6543" ]]; then
             echo "⚠️  Using port 6543 (Transaction mode pooler)"
             echo ""
             echo "Transaction mode doesn't support prepared statements needed by migrations"
-            echo "Switch to Session mode (port 5432 on pooler) for this app"
-            echo "  Supabase → Settings → Database → Connection String → Session mode"
+            echo "Use direct connection instead for GitHub Actions"
+            echo "  Supabase → Settings → Database → Connection String → Direct connection"
             echo ""
           fi
 
@@ -116,22 +120,28 @@ jobs:
             echo ""
             echo "Common fixes:"
             echo ""
-            echo "1. ✅ RECOMMENDED: Use Session mode pooler (port 5432)"
-            echo "   Supabase → Settings → Database → Connection String → Session mode"
-            echo "   Format: postgresql://postgres.[PROJECT]:[PASSWORD]@aws-X-XX-XX.pooler.supabase.com:5432/postgres"
-            echo "   - Session mode supports prepared statements (required for migrations)"
-            echo "   - sqlx 0.8+ fixes SASL auth issues with Session mode"
+            echo "1. ✅ RECOMMENDED: Use DIRECT connection (not pooler) for GitHub Actions"
+            echo "   Supabase → Settings → Database → Connection String"
+            echo "   Format: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres"
+            echo "   (Note: NOT pooler.supabase.com - use db.[PROJECT].supabase.co)"
             echo ""
-            echo "2. If you see 'prepared statement already exists' error:"
+            echo "   Why: Supabase poolers have SASL authentication issues with sqlx"
+            echo "   - Direct connection works reliably with migrations"
+            echo "   - Pooler is better for local dev, direct for CI/CD"
+            echo ""
+            echo "2. If you see 'expected SASLFinal' or SASL authentication errors:"
+            echo "   - You're using the pooler (pooler.supabase.com)"
+            echo "   - Switch to direct connection (db.[PROJECT].supabase.co)"
+            echo ""
+            echo "3. If you see 'prepared statement already exists' error:"
             echo "   - You're using Transaction mode (port 6543)"
-            echo "   - Switch to Session mode (port 5432 on pooler)"
+            echo "   - Switch to direct connection"
             echo ""
-            echo "3. Check Supabase Project Settings:"
-            echo "   - Database → Connection Pooling: Enabled"
+            echo "4. Check Supabase Project Settings:"
             echo "   - Database → Settings: IPv4 Add-on enabled (free tier requirement)"
             echo "   - Project Settings: Ensure project is not paused"
             echo ""
-            echo "4. URL-encode special characters in password"
+            echo "5. URL-encode special characters in password"
             echo "   Example: p@ssw0rd! becomes p%40ssw0rd%21"
             exit 1
           fi
