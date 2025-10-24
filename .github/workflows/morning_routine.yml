@@ -84,9 +84,17 @@ jobs:
 
           # Check which port is being used
           if [[ "$DB_PORT" == "5432" ]]; then
-            echo "⚠️  WARNING: Using port 5432 (direct connection)"
-            echo "For GitHub Actions, Supabase recommends port 6543 (connection pooler)"
-            echo "Update your DATABASE_URL secret to use port 6543 for better reliability"
+            echo "⚠️  WARNING: Using port 5432 (Session pooler or direct connection)"
+            echo ""
+            echo "This app is configured for Transaction pooler (port 6543)"
+            echo "Prepared statements are already disabled in the code (db.rs:19)"
+            echo ""
+            echo "Please update DATABASE_URL to use Transaction mode:"
+            echo "  Supabase → Settings → Database → Connection String → Transaction mode"
+            echo "  Expected port: 6543"
+            echo ""
+          elif [[ "$DB_PORT" == "6543" ]]; then
+            echo "✅ Using port 6543 (Transaction pooler) - correct for this app"
             echo ""
           fi
 
@@ -103,18 +111,23 @@ jobs:
             echo "----------------------------------------"
             echo "❌ Database connection failed with exit code: $EXIT_CODE"
             echo ""
-            echo "Common fixes:"
-            echo "1. Use port 6543 (connection pooler) instead of 5432"
-            echo "   Format: postgresql://postgres:[PASSWORD]@[HOST]:6543/postgres"
+            echo "Common fixes for SASL authentication errors:"
+            echo ""
+            echo "1. ✅ RECOMMENDED: Use Transaction pooler (port 6543)"
+            echo "   This app has prepared statements disabled (db.rs:19)"
+            echo "   Get from: Supabase → Settings → Database → Connection String → Transaction mode"
+            echo "   Format: postgresql://postgres.[PROJECT]:[PASSWORD]@[HOST]:6543/postgres"
             echo ""
             echo "2. Check Supabase Project Settings:"
-            echo "   - Database > Connection Pooling: Ensure it's enabled"
-            echo "   - Database > Settings: Check if IPv4 Add-on is enabled (if on free tier)"
+            echo "   - Database → Connection Pooling: Enable if not enabled"
+            echo "   - Database → Settings: IPv4 Add-on enabled (free tier requirement)"
             echo "   - Project Settings: Ensure project is not paused"
             echo ""
-            echo "3. URL-encode special characters in password if any"
+            echo "3. URL-encode special characters in password"
+            echo "   Example: p@ssw0rd! becomes p%40ssw0rd%21"
             echo ""
-            echo "4. For GitHub Actions, use 'Session' mode connection string from Supabase"
+            echo "4. If using Session pooler causes SASL errors with sqlx 0.7,"
+            echo "   switch to Transaction pooler (already compatible with this codebase)"
             exit 1
           fi
 
