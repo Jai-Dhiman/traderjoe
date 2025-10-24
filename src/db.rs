@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::{PgConnectOptions, PgPoolOptions}, PgPool};
 use tracing::{info, warn};
+use std::str::FromStr;
 
 pub struct Database {
     pub pool: PgPool,
@@ -9,6 +10,13 @@ pub struct Database {
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
         info!("Connecting to PostgreSQL database (Supabase)");
+
+        // Parse connection options from URL
+        let connect_options = PgConnectOptions::from_str(database_url)
+            .context("Failed to parse DATABASE_URL")?
+            // Disable prepared statements for Supabase Transaction pooler (pgBouncer)
+            // pgBouncer in transaction mode doesn't support prepared statements
+            .statement_cache_capacity(0);
 
         let pool = PgPoolOptions::new()
             // Supabase has connection limits - use smaller pool
@@ -20,9 +28,7 @@ impl Database {
             .idle_timeout(std::time::Duration::from_secs(300))
             // Connection lifetime to handle network issues
             .max_lifetime(std::time::Duration::from_secs(1800))
-            // Test connection on acquire to detect stale connections
-            .test_before_acquire(true)
-            .connect(database_url)
+            .connect_with(connect_options)
             .await
             .context("Failed to connect to PostgreSQL database. Check that DATABASE_URL is set correctly and Supabase is accessible.")?;
 
@@ -45,7 +51,9 @@ impl Database {
 
     /// Perform a health check on the database connection
     pub async fn health_check(&self) -> Result<()> {
+        // Use persistent(false) to avoid prepared statements (required for Supabase pgBouncer)
         sqlx::query("SELECT 1")
+            .persistent(false)
             .fetch_one(&self.pool)
             .await
             .context("Database health check failed")?;
@@ -56,13 +64,15 @@ impl Database {
 
     /// Check if pgvector extension is available
     pub async fn check_pgvector(&self) -> Result<bool> {
+        // Use persistent(false) to avoid prepared statements (required for Supabase pgBouncer)
         let result: (bool,) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')"
         )
+        .persistent(false)
         .fetch_one(&self.pool)
         .await
         .context("Failed to check pgvector extension")?;
-        
+
         if result.0 {
             info!("pgvector extension is available");
             Ok(true)
