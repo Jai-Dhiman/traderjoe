@@ -49,7 +49,7 @@ impl PgHasArrayType for PgVector {
 }
 
 impl Encode<'_, Postgres> for PgVector {
-    fn encode_by_ref(&self, buf: &mut PgArgumentBuffer) -> IsNull {
+    fn encode_by_ref(&self, buf: &mut PgArgumentBuffer) -> Result<IsNull, BoxDynError> {
         // pgvector binary format:
         // - 2 bytes: number of dimensions (u16, big-endian)
         // - 2 bytes: unused (0)
@@ -68,7 +68,7 @@ impl Encode<'_, Postgres> for PgVector {
             buf.extend_from_slice(&value.to_be_bytes());
         }
 
-        IsNull::No
+        Ok(IsNull::No)
     }
 }
 

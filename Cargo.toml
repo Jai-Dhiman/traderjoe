@@ -15,7 +15,7 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-retry = "0.3"
 
 # Database
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "migrate", "uuid", "chrono", "json", "bigdecimal"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "migrate", "uuid", "chrono", "json", "bigdecimal"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 bigdecimal = "0.3"
 

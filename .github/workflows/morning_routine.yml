@@ -84,17 +84,20 @@ jobs:
 
           # Check which port is being used
           if [[ "$DB_PORT" == "5432" ]]; then
-            echo "⚠️  WARNING: Using port 5432 (Session pooler or direct connection)"
-            echo ""
-            echo "This app is configured for Transaction pooler (port 6543)"
-            echo "Prepared statements are already disabled in the code (db.rs:19)"
-            echo ""
-            echo "Please update DATABASE_URL to use Transaction mode:"
-            echo "  Supabase → Settings → Database → Connection String → Transaction mode"
-            echo "  Expected port: 6543"
-            echo ""
+            if [[ "$DB_HOST" == *"pooler.supabase.com"* ]]; then
+              echo "✅ Using port 5432 on pooler (Session mode) - correct for sqlx 0.8+"
+              echo ""
+            else
+              echo "⚠️  Using port 5432 on direct connection (not pooled)"
+              echo "For better reliability, use the pooler with Session mode"
+              echo ""
+            fi
           elif [[ "$DB_PORT" == "6543" ]]; then
-            echo "✅ Using port 6543 (Transaction pooler) - correct for this app"
+            echo "⚠️  Using port 6543 (Transaction mode pooler)"
+            echo ""
+            echo "Transaction mode doesn't support prepared statements needed by migrations"
+            echo "Switch to Session mode (port 5432 on pooler) for this app"
+            echo "  Supabase → Settings → Database → Connection String → Session mode"
             echo ""
           fi
 
@@ -111,23 +114,25 @@ jobs:
             echo "----------------------------------------"
             echo "❌ Database connection failed with exit code: $EXIT_CODE"
             echo ""
-            echo "Common fixes for SASL authentication errors:"
+            echo "Common fixes:"
             echo ""
-            echo "1. ✅ RECOMMENDED: Use Transaction pooler (port 6543)"
-            echo "   This app has prepared statements disabled (db.rs:19)"
-            echo "   Get from: Supabase → Settings → Database → Connection String → Transaction mode"
-            echo "   Format: postgresql://postgres.[PROJECT]:[PASSWORD]@[HOST]:6543/postgres"
+            echo "1. ✅ RECOMMENDED: Use Session mode pooler (port 5432)"
+            echo "   Supabase → Settings → Database → Connection String → Session mode"
+            echo "   Format: postgresql://postgres.[PROJECT]:[PASSWORD]@aws-X-XX-XX.pooler.supabase.com:5432/postgres"
+            echo "   - Session mode supports prepared statements (required for migrations)"
+            echo "   - sqlx 0.8+ fixes SASL auth issues with Session mode"
             echo ""
-            echo "2. Check Supabase Project Settings:"
-            echo "   - Database → Connection Pooling: Enable if not enabled"
+            echo "2. If you see 'prepared statement already exists' error:"
+            echo "   - You're using Transaction mode (port 6543)"
+            echo "   - Switch to Session mode (port 5432 on pooler)"
+            echo ""
+            echo "3. Check Supabase Project Settings:"
+            echo "   - Database → Connection Pooling: Enabled"
             echo "   - Database → Settings: IPv4 Add-on enabled (free tier requirement)"
             echo "   - Project Settings: Ensure project is not paused"
             echo ""
-            echo "3. URL-encode special characters in password"
+            echo "4. URL-encode special characters in password"
             echo "   Example: p@ssw0rd! becomes p%40ssw0rd%21"
-            echo ""
-            echo "4. If using Session pooler causes SASL errors with sqlx 0.7,"
-            echo "   switch to Transaction pooler (already compatible with this codebase)"
             exit 1
           fi
 

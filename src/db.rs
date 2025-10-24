@@ -14,8 +14,11 @@ impl Database {
         // Parse connection options from URL
         let connect_options = PgConnectOptions::from_str(database_url)
             .context("Failed to parse DATABASE_URL")?
-            // Disable prepared statements for Supabase Transaction pooler (pgBouncer)
-            // pgBouncer in transaction mode doesn't support prepared statements
+            // Disable statement caching for memory efficiency
+            // For Supabase: Use Session mode pooler (port 5432 on pooler.supabase.com)
+            // - Session mode: port 5432 - supports prepared statements (required for migrations)
+            // - Transaction mode: port 6543 - does NOT support prepared statements
+            // Requires sqlx 0.8+ for SASL authentication fix with Session mode
             .statement_cache_capacity(0);
 
         let pool = PgPoolOptions::new()
