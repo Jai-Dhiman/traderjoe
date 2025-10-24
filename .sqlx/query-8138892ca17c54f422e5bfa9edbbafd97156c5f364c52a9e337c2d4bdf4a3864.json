@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE playbook_bullets\n            SET\n                helpful_count = helpful_count + $2,\n                harmful_count = harmful_count + $3,\n                confidence = GREATEST(0.01, LEAST(0.99, confidence + $4))\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Float4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8138892ca17c54f422e5bfa9edbbafd97156c5f364c52a9e337c2d4bdf4a3864"
+}

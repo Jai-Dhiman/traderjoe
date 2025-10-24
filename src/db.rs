@@ -8,11 +8,18 @@ pub struct Database {
 
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
-        info!("Connecting to PostgreSQL database");
+        info!("Connecting to PostgreSQL database (Supabase)");
 
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            // Supabase has connection limits - use smaller pool
+            .max_connections(5)
             .min_connections(1)
+            // Connection timeout for network latency
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            // Close idle connections faster to stay under limits
+            .idle_timeout(std::time::Duration::from_secs(300))
+            // Connection lifetime to handle network issues
+            .max_lifetime(std::time::Duration::from_secs(1800))
             .connect(database_url)
             .await
             .context("Failed to connect to PostgreSQL database")?;

@@ -41,16 +41,6 @@ chrono-tz = "0.10"
 # LLM Integration
 ollama-rs = "0.2"
 
-# ML Models (Local) - Use newer versions
-candle-core = "0.9"
-candle-nn = "0.9"
-candle-transformers = "0.9"
-hf-hub = "0.4"
-tokenizers = "0.22"
-
-# Python Interop - for ML models and embeddings
-pyo3 = { version = "0.22", features = ["auto-initialize"] }
-
 # Logging & Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }

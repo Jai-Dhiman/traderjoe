@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO ohlcv (symbol, date, open, high, low, close, volume, source)\n                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n                ON CONFLICT (symbol, date, source) \n                DO UPDATE SET \n                    open = EXCLUDED.open,\n                    high = EXCLUDED.high,\n                    low = EXCLUDED.low,\n                    close = EXCLUDED.close,\n                    volume = EXCLUDED.volume\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Date",
+        "Numeric",
+        "Numeric",
+        "Numeric",
+        "Numeric",
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6943c76bc19a50779410a488c2820e5daa6d2234671e3ad82dfd7ce27bf1eceb"
+}

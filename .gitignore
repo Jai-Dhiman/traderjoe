@@ -50,8 +50,8 @@ models/
 *.bin
 *.safetensors
 
-# Data
-data/
+# Data (ignore root data directory but not src/data/)
+/data/
 *.csv
 *.json.gz
 *.parquet
@@ -72,5 +72,6 @@ tmp/
 WARP.md
 .claude/
 
-.sqlx/
+# Keep .sqlx/ for offline query mode in CI
+# .sqlx/
 .venv/

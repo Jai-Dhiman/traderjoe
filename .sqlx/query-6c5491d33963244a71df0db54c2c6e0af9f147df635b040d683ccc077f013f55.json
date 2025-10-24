@@ -1,0 +1,84 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO account_balance (balance, equity, timestamp)\n            VALUES ($1, $2, $3)\n            RETURNING\n                id,\n                balance,\n                equity,\n                timestamp,\n                daily_pnl,\n                weekly_pnl,\n                monthly_pnl,\n                max_drawdown_pct,\n                sharpe_ratio,\n                win_rate,\n                total_trades\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "balance",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "equity",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "timestamp",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "daily_pnl",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "weekly_pnl",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "monthly_pnl",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "max_drawdown_pct",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "sharpe_ratio",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "win_rate",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "total_trades",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Float8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6c5491d33963244a71df0db54c2c6e0af9f147df635b040d683ccc077f013f55"
+}

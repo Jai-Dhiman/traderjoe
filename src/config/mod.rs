@@ -60,8 +60,9 @@ impl Config {
         let config = Config {
             database: DatabaseConfig {
                 url: database_url,
+                // Default to 5 for Supabase connection limits
                 max_connections: env::var("DB_MAX_CONNECTIONS")
-                    .unwrap_or_else(|_| "10".to_string())
+                    .unwrap_or_else(|_| "5".to_string())
                     .parse()
                     .context("Invalid DB_MAX_CONNECTIONS value")?,
                 min_connections: env::var("DB_MIN_CONNECTIONS")
@@ -126,7 +127,7 @@ impl Default for Config {
         Self {
             database: DatabaseConfig {
                 url: "postgresql://localhost/traderjoe".to_string(),
-                max_connections: 10,
+                max_connections: 5,
                 min_connections: 1,
             },
             apis: ApiConfig {

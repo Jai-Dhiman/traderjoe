@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO circuit_breakers (is_halted, reason, halted_at, triggered_by, created_at)\n                    VALUES ($1, $2::text, $3, $4, $5)\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bool",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c0d683c316a91bd5e7680742cb245b9518dd0c1dd31d1c0de3a7e31936780f1c"
+}

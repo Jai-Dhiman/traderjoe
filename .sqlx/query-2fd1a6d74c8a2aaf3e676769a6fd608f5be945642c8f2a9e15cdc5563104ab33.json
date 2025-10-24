@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE paper_trades\n            SET\n                max_favorable_excursion = $1,\n                max_adverse_excursion = $2\n            WHERE id = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Float8",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2fd1a6d74c8a2aaf3e676769a6fd608f5be945642c8f2a9e15cdc5563104ab33"
+}

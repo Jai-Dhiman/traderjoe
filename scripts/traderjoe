@@ -38,50 +38,15 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Set up Python environment for PyO3
-setup_python_env() {
-    log_info "Setting up Python environment..."
-
-    # Find the uv Python installation
-    PYTHON_BASE="/Users/jdhiman/.local/share/uv/python/cpython-3.11.14-macos-aarch64-none"
-    VENV_PATH="$PROJECT_ROOT/.venv"
-
-    if [[ ! -d "$PYTHON_BASE" ]]; then
-        log_error "Python base installation not found at $PYTHON_BASE"
-        exit 1
-    fi
-
-    if [[ ! -d "$VENV_PATH" ]]; then
-        log_error "Virtual environment not found at $VENV_PATH"
-        log_info "Run: uv venv && uv pip install sentence-transformers"
-        exit 1
-    fi
-
-    export PYTHONHOME="$PYTHON_BASE"
-    export PYTHONPATH="$VENV_PATH/lib/python3.11/site-packages"
-    export PYO3_PYTHON="$VENV_PATH/bin/python"
-
-    log_success "Python environment configured"
-}
-
 # Set up database connection
 setup_database() {
     log_info "Setting up database connection..."
 
     export DATABASE_URL="${DATABASE_URL:-postgresql://localhost/traderjoe}"
 
-    # Test database connectivity using psql from homebrew path
-    local PSQL_PATH="/opt/homebrew/opt/postgresql@16/bin/psql"
-    if [[ ! -x "$PSQL_PATH" ]]; then
-        PSQL_PATH="psql"  # Fallback to system psql
-    fi
-
-    if ! "$PSQL_PATH" "$DATABASE_URL" -c "SELECT 1" >/dev/null 2>&1; then
-        log_warn "Cannot verify database connection (psql test failed)"
-        log_info "Continuing anyway - traderjoe will handle connection errors"
-    else
-        log_success "Database connection verified"
-    fi
+    # Note: Using remote Supabase database
+    # Connection will be verified by the application
+    log_success "Database URL configured"
 }
 
 # Global variable to track if we started Ollama
@@ -218,7 +183,6 @@ main() {
     echo
 
     # Setup environment
-    setup_python_env
     setup_database
 
     # Only manage Ollama if SKIP_OLLAMA_MANAGEMENT is not set

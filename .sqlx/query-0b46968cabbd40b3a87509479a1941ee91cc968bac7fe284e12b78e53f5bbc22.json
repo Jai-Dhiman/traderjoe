@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO ace_contexts\n            (id, timestamp, market_state, decision, reasoning, confidence, outcome, embedding)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Jsonb",
+        "Jsonb",
+        "Text",
+        "Float4",
+        "Jsonb",
+        {
+          "Custom": {
+            "name": "vector",
+            "kind": "Simple"
+          }
+        }
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0b46968cabbd40b3a87509479a1941ee91cc968bac7fe284e12b78e53f5bbc22"
+}

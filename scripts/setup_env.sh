@@ -42,13 +42,8 @@ fi
 # FALLBACK DEFAULTS (if not set in .env)
 # =============================================================================
 
-# Database
+# Database (use Supabase connection string from .env)
 export DATABASE_URL="${DATABASE_URL:-postgresql://localhost/traderjoe}"
-
-# Python environment for PyO3 (embeddings)
-export PYO3_PYTHON="${PYO3_PYTHON:-/Users/jdhiman/Documents/traderjoe/.venv/bin/python}"
-export PYTHONHOME="${PYTHONHOME:-/Users/jdhiman/.local/share/uv/python/cpython-3.11.14-macos-aarch64-none}"
-export PYTHONPATH="${PYTHONPATH:-/Users/jdhiman/Documents/traderjoe/.venv/lib/python3.11/site-packages}"
 
 # =============================================================================
 # API KEY VALIDATION

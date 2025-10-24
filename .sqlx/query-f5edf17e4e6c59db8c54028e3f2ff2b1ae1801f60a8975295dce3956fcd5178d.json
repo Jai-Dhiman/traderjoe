@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                id, section, content, helpful_count, harmful_count, confidence,\n                last_used, created_at, updated_at, source_context_id, meta\n            FROM playbook_bullets \n            WHERE last_used >= $1 OR (last_used IS NULL AND created_at >= $1)\n            ORDER BY COALESCE(last_used, created_at) DESC, confidence DESC\n            LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "section",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "content",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "helpful_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "harmful_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "confidence",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_used",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "source_context_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 10,
+        "name": "meta",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "f5edf17e4e6c59db8c54028e3f2ff2b1ae1801f60a8975295dce3956fcd5178d"
+}
