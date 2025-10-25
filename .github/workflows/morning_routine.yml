@@ -84,10 +84,9 @@ jobs:
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           PAPER_TRADING: true
-          LLM_PROVIDER: cerebras
-          PRIMARY_MODEL: llama-3.3-70b
-          FALLBACK_MODEL: llama-3.1-8b
         run: |
+          set +e  # Disable exit on error for the entire script
+
           echo "=== Environment Check ==="
           echo "LLM_PROVIDER: $LLM_PROVIDER"
           echo "PRIMARY_MODEL: $PRIMARY_MODEL"
@@ -96,11 +95,19 @@ jobs:
           echo "========================="
 
           echo "Running morning analysis..."
-          OUTPUT=$(./target/release/traderjoe analyze --symbol SPY 2>&1)
-          echo "$OUTPUT"
+          ./target/release/traderjoe analyze --symbol SPY 2>&1 | tee /tmp/analysis_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
 
-          # Save full output to file for next step
-          echo "$OUTPUT" > /tmp/analysis_output.txt
+          echo ""
+          echo "Exit code: $EXIT_CODE"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Analysis failed with exit code $EXIT_CODE"
+            echo "Full output above and saved to /tmp/analysis_output.txt"
+            exit $EXIT_CODE
+          fi
+
+          echo "✅ Analysis completed successfully"
 
       - name: Auto-Execute Trade if Confidence Threshold Met
         env:

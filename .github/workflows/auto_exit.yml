@@ -10,6 +10,9 @@ on:
 env:
   RUST_BACKTRACE: 1
   RUST_LOG: traderjoe=info,sqlx=warn
+  LLM_PROVIDER: cerebras
+  PRIMARY_MODEL: llama-3.3-70b
+  FALLBACK_MODEL: llama-3.1-8b
 
 jobs:
   auto_exit:
