@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     # Only run on weekdays during market hours
     if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
+    permissions:
+      contents: read
+      models: write  # Required for GitHub Models API
 
     steps:
       - name: Checkout code
