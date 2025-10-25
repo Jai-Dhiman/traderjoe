@@ -79,15 +79,27 @@ impl Config {
                 github_token: env::var("GITHUB_TOKEN").ok(),
             },
             llm: LlmConfig {
-                provider: env::var("LLM_PROVIDER").unwrap_or_else(|_| "cerebras".to_string()),
+                provider: {
+                    let provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "cerebras".to_string());
+                    eprintln!("🔧 Config: LLM_PROVIDER = {}", provider);
+                    provider
+                },
                 cerebras_url: env::var("CEREBRAS_URL")
                     .unwrap_or_else(|_| "https://api.cerebras.ai/v1".to_string()),
                 openrouter_url: env::var("OPENROUTER_URL")
                     .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
-                primary_model: env::var("PRIMARY_MODEL")
-                    .unwrap_or_else(|_| "llama-3.3-70b".to_string()),
-                fallback_model: env::var("FALLBACK_MODEL")
-                    .unwrap_or_else(|_| "llama-3.1-8b".to_string()),
+                primary_model: {
+                    let model = env::var("PRIMARY_MODEL")
+                        .unwrap_or_else(|_| "llama-3.3-70b".to_string());
+                    eprintln!("🔧 Config: PRIMARY_MODEL = {}", model);
+                    model
+                },
+                fallback_model: {
+                    let model = env::var("FALLBACK_MODEL")
+                        .unwrap_or_else(|_| "llama-3.1-8b".to_string());
+                    eprintln!("🔧 Config: FALLBACK_MODEL = {}", model);
+                    model
+                },
                 timeout_seconds: env::var("LLM_TIMEOUT_SECONDS")
                     .unwrap_or_else(|_| "30".to_string())
                     .parse()

@@ -84,7 +84,17 @@ jobs:
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           PAPER_TRADING: true
+          LLM_PROVIDER: cerebras
+          PRIMARY_MODEL: llama-3.3-70b
+          FALLBACK_MODEL: llama-3.1-8b
         run: |
+          echo "=== Environment Check ==="
+          echo "LLM_PROVIDER: $LLM_PROVIDER"
+          echo "PRIMARY_MODEL: $PRIMARY_MODEL"
+          echo "FALLBACK_MODEL: $FALLBACK_MODEL"
+          echo "CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:0:10}..."
+          echo "========================="
+
           echo "Running morning analysis..."
           OUTPUT=$(./target/release/traderjoe analyze --symbol SPY 2>&1)
           echo "$OUTPUT"
