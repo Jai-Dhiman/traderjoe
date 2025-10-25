@@ -31,8 +31,7 @@ pub struct ApiConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    pub provider: String, // "ollama", "cerebras", or "openrouter"
-    pub ollama_url: String,
+    pub provider: String, // "cerebras" or "openrouter"
     pub cerebras_url: String,
     pub openrouter_url: String,
     pub primary_model: String,
@@ -52,15 +51,14 @@ impl Config {
     pub fn load() -> Result<Self> {
         // Load .env file if it exists (fail silently if not found)
         dotenv::dotenv().ok();
-        
+
         // Database configuration - DATABASE_URL is required
         let database_url = env::var("DATABASE_URL")
             .context("DATABASE_URL environment variable is required but not set")?;
-        
+
         let config = Config {
             database: DatabaseConfig {
                 url: database_url,
-                // Default to 5 for Supabase connection limits
                 max_connections: env::var("DB_MAX_CONNECTIONS")
                     .unwrap_or_else(|_| "5".to_string())
                     .parse()
@@ -81,18 +79,15 @@ impl Config {
                 github_token: env::var("GITHUB_TOKEN").ok(),
             },
             llm: LlmConfig {
-                provider: env::var("LLM_PROVIDER")
-                    .unwrap_or_else(|_| "ollama".to_string()),
-                ollama_url: env::var("OLLAMA_URL")
-                    .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+                provider: env::var("LLM_PROVIDER").unwrap_or_else(|_| "cerebras".to_string()),
                 cerebras_url: env::var("CEREBRAS_URL")
                     .unwrap_or_else(|_| "https://api.cerebras.ai/v1".to_string()),
                 openrouter_url: env::var("OPENROUTER_URL")
                     .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
                 primary_model: env::var("PRIMARY_MODEL")
-                    .unwrap_or_else(|_| "llama3.2:3b".to_string()),
+                    .unwrap_or_else(|_| "llama-3.3-70b".to_string()),
                 fallback_model: env::var("FALLBACK_MODEL")
-                    .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+                    .unwrap_or_else(|_| "llama-3.1-8b".to_string()),
                 timeout_seconds: env::var("LLM_TIMEOUT_SECONDS")
                     .unwrap_or_else(|_| "30".to_string())
                     .parse()
@@ -117,7 +112,7 @@ impl Config {
                     .context("Invalid MAX_WEEKLY_LOSS_PCT value")?,
             },
         };
-        
+
         Ok(config)
     }
 }
@@ -141,12 +136,11 @@ impl Default for Config {
                 github_token: None,
             },
             llm: LlmConfig {
-                provider: "ollama".to_string(),
-                ollama_url: "http://localhost:11434".to_string(),
+                provider: "cerebras".to_string(),
                 cerebras_url: "https://api.cerebras.ai/v1".to_string(),
                 openrouter_url: "https://openrouter.ai/api/v1".to_string(),
-                primary_model: "llama3.2:3b".to_string(),
-                fallback_model: "gpt-4o-mini".to_string(),
+                primary_model: "llama-3.3-70b".to_string(),
+                fallback_model: "llama-3.1-8b".to_string(),
                 timeout_seconds: 30,
             },
             trading: TradingConfig {

@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
-use sqlx::{postgres::{PgConnectOptions, PgPoolOptions}, PgPool};
-use tracing::{info, warn};
+use sqlx::{
+    postgres::{PgConnectOptions, PgPoolOptions},
+    PgPool,
+};
 use std::str::FromStr;
+use tracing::{info, warn};
 
 pub struct Database {
     pub pool: PgPool,
@@ -15,23 +18,6 @@ impl Database {
         let connect_options = PgConnectOptions::from_str(database_url)
             .context("Failed to parse DATABASE_URL")?
             // Disable statement caching for memory efficiency
-            // For Neon (RECOMMENDED for serverless/GitHub Actions):
-            //   Connection String Format:
-            //     postgresql://[USER]:[PASSWORD]@[HOST]/[DATABASE]?sslmode=require
-            //
-            //   Get connection string from: Neon Console → Dashboard → Connection Details
-            //   - Choose "Pooled connection" for better performance
-            //   - sslmode=require is required by Neon
-            //   - Remove channel_binding parameter (not supported by sqlx)
-            //
-            //   Why Neon works great:
-            //   - Built in Rust (native sqlx compatibility)
-            //   - No SASL authentication issues
-            //   - IPv4 support out of the box (works on GitHub Actions)
-            //   - Generous free tier (512MB storage, unlimited projects)
-            //   - Serverless-first design (perfect for scheduled workflows)
-            //
-            // See: https://neon.tech/docs for more details
             .statement_cache_capacity(0);
 
         let pool = PgPoolOptions::new()
@@ -46,7 +32,7 @@ impl Database {
             .max_lifetime(std::time::Duration::from_secs(1800))
             .connect_with(connect_options)
             .await
-            .context("Failed to connect to PostgreSQL database. Check that DATABASE_URL is set correctly and Supabase is accessible.")?;
+            .context("Failed to connect to PostgreSQL database. Check that DATABASE_URL is set correctly and accessible.")?;
 
         info!("Database connection established successfully");
         Ok(Database { pool })
@@ -67,7 +53,6 @@ impl Database {
 
     /// Perform a health check on the database connection
     pub async fn health_check(&self) -> Result<()> {
-        // Use persistent(false) to avoid prepared statements (required for Supabase pgBouncer)
         sqlx::query("SELECT 1")
             .persistent(false)
             .fetch_one(&self.pool)
@@ -80,14 +65,12 @@ impl Database {
 
     /// Check if pgvector extension is available
     pub async fn check_pgvector(&self) -> Result<bool> {
-        // Use persistent(false) to avoid prepared statements (required for Supabase pgBouncer)
-        let result: (bool,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')"
-        )
-        .persistent(false)
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to check pgvector extension")?;
+        let result: (bool,) =
+            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')")
+                .persistent(false)
+                .fetch_one(&self.pool)
+                .await
+                .context("Failed to check pgvector extension")?;
 
         if result.0 {
             info!("pgvector extension is available");

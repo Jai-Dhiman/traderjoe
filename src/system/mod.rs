@@ -109,20 +109,6 @@ impl SystemMonitor {
         }
     }
 
-    /// Check if Ollama process is running and get its memory usage
-    pub fn get_ollama_memory_usage(&mut self) -> Option<f64> {
-        self.system.refresh_processes();
-
-        for (_pid, process) in self.system.processes() {
-            let process_name = process.name().to_lowercase();
-            if process_name.contains("ollama") {
-                let memory_mb = process.memory() / MB;
-                return Some(memory_mb as f64 / 1024.0); // Convert to GB
-            }
-        }
-
-        None
-    }
 
     /// Get detailed system stats for logging
     pub fn get_system_stats(&mut self) -> Result<serde_json::Value> {
@@ -130,7 +116,6 @@ impl SystemMonitor {
 
         let memory_stats = self.check_available_memory()?;
         let process_memory_gb = self.get_process_memory_usage()?;
-        let ollama_memory_gb = self.get_ollama_memory_usage();
 
         Ok(serde_json::json!({
             "timestamp": chrono::Utc::now(),
@@ -141,7 +126,6 @@ impl SystemMonitor {
                 "usage_pct": memory_stats.memory_usage_pct,
             },
             "process_memory_gb": process_memory_gb,
-            "ollama_memory_gb": ollama_memory_gb,
             "cpu_count": self.system.cpus().len(),
         }))
     }
