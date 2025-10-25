@@ -1342,7 +1342,7 @@ pub async fn backtest(
 /// Validate all required services before trade execution
 /// This prevents trades from being executed when critical services are unavailable
 async fn validate_required_services(pool: &PgPool) -> Result<()> {
-    use traderjoe::{data::MarketDataClient, llm::LLMClient};
+    use crate::{data::MarketDataClient, llm::LLMClient};
     use tracing::{error, info, warn};
 
     let mut errors = Vec::new();
@@ -1375,7 +1375,7 @@ async fn validate_required_services(pool: &PgPool) -> Result<()> {
 
     // 3. Check Ollama/LLM connectivity - CRITICAL
     info!("Validating Ollama/LLM connectivity...");
-    let config = traderjoe::config::Config::load()?;
+    let config = crate::config::Config::load()?;
     match LLMClient::from_config(&config).await {
         Ok(llm_client) => {
             // Verify Ollama is responsive

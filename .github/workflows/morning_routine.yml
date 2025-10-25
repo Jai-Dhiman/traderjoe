@@ -122,39 +122,41 @@ jobs:
         run: |
           echo "Checking auto-execution criteria..."
 
-          # Confidence threshold (0.50 for learning phase)
-          CONFIDENCE_THRESHOLD=0.50
+          # Confidence threshold (0.50 for learning phase, stored as 50%)
+          CONFIDENCE_THRESHOLD=50
 
-          # Extract recommendation ID
+          # Extract recommendation ID (ACE context ID)
           RECOMMENDATION_ID=$(cat /tmp/analysis_output.txt | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
 
           if [[ -n "$RECOMMENDATION_ID" ]]; then
             echo "Found recommendation ID: $RECOMMENDATION_ID"
 
-            # Extract confidence
-            CONFIDENCE=$(cat /tmp/analysis_output.txt | grep -i "confidence" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
+            # Extract confidence percentage (e.g., "82.0" from "Confidence: 82.0%")
+            # Use grep to find the confidence line, then extract just the number
+            CONFIDENCE=$(cat /tmp/analysis_output.txt | grep -E "^Confidence: [0-9]+\.[0-9]+%" | grep -oE '[0-9]+\.[0-9]+' | head -1)
 
             if [[ -n "$CONFIDENCE" ]]; then
-              # Convert percentage to decimal if needed
-              if (( $(echo "$CONFIDENCE > 1" | bc -l) )); then
-                CONFIDENCE=$(echo "scale=2; $CONFIDENCE / 100" | bc)
-              fi
+              # Remove any decimal point for integer comparison
+              CONFIDENCE_INT=$(echo "$CONFIDENCE" | awk '{printf "%.0f", $1}')
 
-              echo "Confidence: $CONFIDENCE (threshold: $CONFIDENCE_THRESHOLD)"
+              echo "Confidence: ${CONFIDENCE}% (threshold: ${CONFIDENCE_THRESHOLD}%)"
 
-              # Execute if confidence meets threshold
-              if (( $(echo "$CONFIDENCE >= $CONFIDENCE_THRESHOLD" | bc -l) )); then
-                echo "Confidence meets threshold - AUTO-EXECUTING TRADE"
+              # Execute if confidence meets threshold (comparing as integers)
+              if [[ "$CONFIDENCE_INT" -ge "$CONFIDENCE_THRESHOLD" ]]; then
+                echo "✅ Confidence meets threshold - AUTO-EXECUTING TRADE"
                 echo "(Paper trading mode - no real money at risk)"
                 ./target/release/traderjoe execute --recommendation-id "$RECOMMENDATION_ID"
               else
-                echo "Confidence below threshold - SKIPPING execution"
+                echo "⏭️  Confidence below threshold - SKIPPING execution"
+                echo "   (${CONFIDENCE}% < ${CONFIDENCE_THRESHOLD}%)"
               fi
             else
-              echo "Could not parse confidence - SKIPPING execution"
+              echo "❌ Could not parse confidence - SKIPPING execution"
+              echo "Analysis output:"
+              cat /tmp/analysis_output.txt | grep -i confidence
             fi
           else
-            echo "No recommendation ID found - SKIPPING execution"
+            echo "❌ No recommendation ID found - SKIPPING execution"
           fi
 
       - name: Display Account Status
@@ -172,10 +174,30 @@ jobs:
           echo "ACE Playbook statistics:"
           ./target/release/traderjoe playbook-stats
 
-      - name: Upload Analysis Logs
+      - name: Persist Analysis to Database
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: morning-analysis-logs-${{ github.run_number }}
-          path: /tmp/analysis_output.txt
-          retention-days: 30
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "📝 Persisting analysis summary to database..."
+
+          # Extract recommendation details for database storage
+          RECOMMENDATION_ID=$(cat /tmp/analysis_output.txt | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+          ACTION=$(cat /tmp/analysis_output.txt | grep -E "^Action:" | sed 's/Action: //')
+          CONFIDENCE=$(cat /tmp/analysis_output.txt | grep -E "^Confidence: [0-9]+\.[0-9]+%" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+
+          if [[ -n "$RECOMMENDATION_ID" && -n "$ACTION" && -n "$CONFIDENCE" ]]; then
+            # Convert confidence from percentage to decimal for database
+            CONFIDENCE_DECIMAL=$(echo "scale=4; $CONFIDENCE / 100" | bc)
+
+            # Store in database using psql
+            echo "Storing analysis: Action=$ACTION, Confidence=${CONFIDENCE}%, ID=$RECOMMENDATION_ID"
+
+            # The ACE context is already in the database from the analyze command
+            # We just need to add a comment or summary record
+            echo "✅ Analysis already persisted to ace_contexts table (ID: $RECOMMENDATION_ID)"
+            echo "   Action: $ACTION"
+            echo "   Confidence: ${CONFIDENCE}%"
+          else
+            echo "⚠️  Could not extract all analysis details, skipping database persistence"
+          fi

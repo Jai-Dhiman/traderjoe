@@ -42,10 +42,10 @@ impl SentimentClient {
         let symbol_str = symbol.unwrap_or("SPY");
         tracing::info!("Analyzing Reddit sentiment for: {}", symbol_str);
 
-        // If credentials are not configured, return a useful stub
+        // If credentials are not configured, return error to exclude from analysis
         if self.reddit_client_id.is_none() || self.reddit_client_secret.is_none() {
-            tracing::warn!("Reddit credentials not configured, using heuristic fallback");
-            return self.fallback_sentiment(symbol_str).await;
+            tracing::warn!("Reddit credentials not configured - sentiment will be excluded from analysis");
+            return Err(DataError::Config("Reddit API credentials not configured".to_string()));
         }
 
         // Try to fetch real Reddit data
@@ -55,8 +55,8 @@ impl SentimentClient {
                 Ok(sentiment)
             }
             Err(e) => {
-                tracing::warn!("Reddit API failed: {}, using fallback", e);
-                self.fallback_sentiment(symbol_str).await
+                tracing::warn!("Reddit API failed: {} - sentiment will be excluded from analysis", e);
+                Err(e)
             }
         }
     }
@@ -184,21 +184,6 @@ impl SentimentClient {
         }
     }
 
-    /// Fallback sentiment when Reddit API is unavailable
-    async fn fallback_sentiment(&self, symbol: &str) -> DataResult<serde_json::Value> {
-        let sentiment = json!({
-            "symbol": symbol,
-            "score": 0.0,
-            "source": "reddit",
-            "sample_size": 0,
-            "timestamp": Utc::now().to_rfc3339(),
-            "interpretation": "Neutral (fallback)",
-            "note": "Reddit API credentials not configured or unavailable"
-        });
-
-        self.persist_sentiment(&sentiment).await?;
-        Ok(sentiment)
-    }
 
     /// Persist sentiment data to database
     async fn persist_sentiment(&self, sentiment: &serde_json::Value) -> DataResult<()> {

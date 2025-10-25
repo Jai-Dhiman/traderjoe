@@ -1,14 +1,13 @@
 #![deny(clippy::unwrap_used)]
 
 pub mod ace;
+pub mod cli;
 pub mod config;
 pub mod data;
 pub mod db;
 pub mod embeddings;
 pub mod llm;
-pub mod ml;
 pub mod orchestrator;
-pub mod system;
 pub mod trading;
 pub mod vector;
 

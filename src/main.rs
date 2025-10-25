@@ -6,7 +6,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod cli;
 
 // Import from library
-use traderjoe::{config, data, db, embeddings, vector, ace, trading, orchestrator};
+use traderjoe::{config, data, db, embeddings, llm, vector, ace, trading, orchestrator};
 
 use cli::Cli;
 use config::Config;

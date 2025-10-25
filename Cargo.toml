@@ -89,8 +89,7 @@ name = "traderjoe"
 path = "src/main.rs"
 
 [features]
-default = ["ml"]
-ml = []
+default = []
 
 [profile.release]
 lto = true

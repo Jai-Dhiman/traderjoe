@@ -95,10 +95,20 @@ impl MorningOrchestrator {
         info!("📊 Computing technical indicators...");
         let ml_signals = self.compute_ml_signals(&market_data).await?;
 
-        // Step 3: Fetch research and sentiment
+        // Step 3: Fetch research and sentiment (both can fail gracefully)
         info!("🔍 Gathering research and sentiment...");
-        let (research_data, sentiment_data) =
-            tokio::try_join!(self.fetch_research(symbol), self.fetch_sentiment(symbol))?;
+
+        // Fetch research (required, falls back to limited data)
+        let research_data = self.fetch_research(symbol).await?;
+
+        // Fetch sentiment (optional, may be excluded if unavailable)
+        let sentiment_data = match self.fetch_sentiment(symbol).await {
+            Ok(data) => Some(data),
+            Err(e) => {
+                warn!("Sentiment data unavailable: {} - continuing without sentiment", e);
+                None
+            }
+        };
 
         // Log research results
         let research_count = research_data["results"].as_array().map(|r| r.len()).unwrap_or(0);
@@ -318,11 +328,11 @@ impl MorningOrchestrator {
         market_data: &Value,
         ml_signals: &Value,
         research_data: &Value,
-        sentiment_data: &Value,
+        sentiment_data: &Option<Value>,
     ) -> Result<Value> {
         let current_time = Utc::now();
 
-        Ok(json!({
+        let mut state = json!({
             "timestamp": current_time,
             "symbol": symbol,
             "market_data": market_data,
@@ -333,18 +343,28 @@ impl MorningOrchestrator {
                 "availability": if research_data["source"] == "fallback" { "limited" } else { "full" },
                 "data_source": research_data["source"].as_str().unwrap_or("unknown")
             },
-            "sentiment": {
-                "reddit_score": sentiment_data["score"].as_f64().unwrap_or(0.5),
-                "sentiment_label": match sentiment_data["score"].as_f64().unwrap_or(0.5) {
+            "market_regime": self.assess_market_regime(market_data, ml_signals).await,
+        });
+
+        // Only include sentiment if available
+        if let Some(sentiment) = sentiment_data {
+            state["sentiment"] = json!({
+                "reddit_score": sentiment["score"].as_f64().unwrap_or(0.5),
+                "sentiment_label": match sentiment["score"].as_f64().unwrap_or(0.5) {
                     s if s > 0.7 => "bullish",
                     s if s > 0.3 => "neutral",
                     _ => "bearish"
                 },
-                "source": sentiment_data["source"].as_str().unwrap_or("unknown")
-            },
-            "market_regime": self.assess_market_regime(market_data, ml_signals).await,
-            "analysis_quality": self.assess_analysis_quality(market_data, research_data, sentiment_data).await
-        }))
+                "source": sentiment["source"].as_str().unwrap_or("reddit"),
+                "sample_size": sentiment["sample_size"].as_u64().unwrap_or(0)
+            });
+        } else {
+            state["sentiment"] = json!({"availability": "unavailable", "note": "Sentiment data not available for this analysis"});
+        }
+
+        state["analysis_quality"] = self.assess_analysis_quality(market_data, research_data, sentiment_data).await;
+
+        Ok(state)
     }
 
     /// Retrieve similar historical contexts using vector search
@@ -529,7 +549,7 @@ impl MorningOrchestrator {
         &self,
         market_data: &Value,
         research_data: &Value,
-        sentiment_data: &Value,
+        sentiment_data: &Option<Value>,
     ) -> Value {
         let market_quality = if market_data["data_points"].as_u64().unwrap_or(0) >= 20 {
             "good"
@@ -541,17 +561,19 @@ impl MorningOrchestrator {
         } else {
             "limited"
         };
-        let sentiment_quality = if sentiment_data.get("score").is_some() {
+        let sentiment_quality = if sentiment_data.as_ref().and_then(|s| s.get("score")).is_some() {
             "good"
         } else {
-            "limited"
+            "unavailable"
         };
 
         json!({
             "market_data": market_quality,
             "research": research_quality,
             "sentiment": sentiment_quality,
-            "overall": if market_quality == "good" && (research_quality == "good" || sentiment_quality == "good") {
+            "overall": if market_quality == "good" && research_quality == "good" {
+                "sufficient"
+            } else if market_quality == "good" && sentiment_quality == "good" {
                 "sufficient"
             } else {
                 "limited"
@@ -560,8 +582,8 @@ impl MorningOrchestrator {
     }
 
     /// Check service health and alert on degraded services
-    /// This detects when external APIs are using fallback mode
-    async fn check_service_health(&self, research_data: &Value, sentiment_data: &Value) {
+    /// This detects when external APIs are using fallback mode or unavailable
+    async fn check_service_health(&self, research_data: &Value, sentiment_data: &Option<Value>) {
         let mut degraded_services = Vec::new();
 
         // Check if research is using fallback
@@ -570,10 +592,9 @@ impl MorningOrchestrator {
             degraded_services.push("Research/Exa");
         }
 
-        // Check if sentiment is using fallback
-        if sentiment_data["source"].as_str() == Some("reddit")
-            && sentiment_data["note"].as_str().map(|s| s.contains("not configured")).unwrap_or(false) {
-            warn!("⚠️  DEGRADED SERVICE: Reddit API is unavailable - using fallback data");
+        // Check if sentiment is unavailable
+        if sentiment_data.is_none() {
+            warn!("⚠️  SERVICE UNAVAILABLE: Reddit API - sentiment data excluded from analysis");
             degraded_services.push("Reddit Sentiment");
         }
 
