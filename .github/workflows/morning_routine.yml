@@ -75,33 +75,57 @@ jobs:
             echo "✅ Network connection to $DB_HOST:$DB_PORT successful"
           else
             echo "⚠️  Cannot establish TCP connection to $DB_HOST:$DB_PORT"
-            echo "This might indicate:"
-            echo "  - Supabase firewall blocking GitHub Actions IPs"
-            echo "  - Project paused (free tier limitation)"
-            echo "  - Wrong host or port"
+            echo ""
+            echo "This indicates a network/firewall issue:"
+
+            if [[ "$DB_HOST" == db.*.supabase.co ]]; then
+              echo ""
+              echo "🔒 Direct connection (db.*.supabase.co) is BLOCKED!"
+              echo ""
+              echo "GitHub Actions doesn't support IPv6, and direct connections require IPv4 add-on ($4/mo)."
+              echo ""
+              echo "✅ FREE SOLUTION: Use Supavisor Transaction Mode + prefer_simple_protocol"
+              echo ""
+              echo "Steps:"
+              echo "  1. Go to Supabase Dashboard → Database → Connection String"
+              echo "  2. Select 'Transaction' mode (port 6543)"
+              echo "  3. Copy the connection string"
+              echo "  4. Append: ?prefer_simple_protocol=1&connect_timeout=10"
+              echo ""
+              echo "  Example:"
+              echo "  postgresql://postgres.doprvuzrijoqgcyeqvmb:[PASSWORD]@aws-X-XX-XX.pooler.supabase.com:6543/postgres?prefer_simple_protocol=1&connect_timeout=10"
+              echo ""
+              echo "  5. Update your DATABASE_URL GitHub secret with this connection string"
+              echo ""
+              echo "  Why this works:"
+              echo "  - Supavisor Transaction mode (6543) supports IPv4 (FREE)"
+              echo "  - prefer_simple_protocol=1 disables prepared statements"
+              echo "  - Compatible with sqlx migrations and GitHub Actions"
+              echo ""
+            else
+              echo "  - Supabase firewall blocking GitHub Actions IPs"
+              echo "  - Project paused (free tier limitation)"
+              echo "  - Wrong host or port"
+            fi
           fi
           echo ""
 
-          # Check which port and host is being used
-          if [[ "$DB_PORT" == "5432" ]]; then
-            if [[ "$DB_HOST" == *"pooler.supabase.com"* ]]; then
-              echo "⚠️  Using port 5432 on pooler (Session mode)"
-              echo ""
-              echo "Known issue: Supabase Session pooler has SASL auth issues with sqlx"
-              echo "Recommendation: Use direct connection for GitHub Actions"
-              echo "  Supabase → Settings → Database → Connection String → Direct connection"
-              echo "  Format: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres"
-              echo ""
-            else
-              echo "✅ Using port 5432 on direct connection - recommended for GitHub Actions"
-              echo ""
-            fi
-          elif [[ "$DB_PORT" == "6543" ]]; then
-            echo "⚠️  Using port 6543 (Transaction mode pooler)"
+          # Check which database provider is being used
+          if [[ "$DB_HOST" == *"neon.tech"* ]]; then
+            echo "✅ Using Neon database - excellent choice for GitHub Actions!"
             echo ""
-            echo "Transaction mode doesn't support prepared statements needed by migrations"
-            echo "Use direct connection instead for GitHub Actions"
-            echo "  Supabase → Settings → Database → Connection String → Direct connection"
+          elif [[ "$DB_HOST" == *"supabase.com"* ]]; then
+            echo "⚠️  Using Supabase database"
+            echo ""
+            if [[ "$DB_HOST" == *"pooler.supabase.com"* ]]; then
+              echo "Note: Supabase pooler may have SASL authentication issues with sqlx"
+            else
+              echo "Note: Direct Supabase connections require IPv4 add-on for GitHub Actions"
+            fi
+            echo "Consider switching to Neon (neon.tech) for better CI/CD support"
+            echo ""
+          else
+            echo "Database host: $DB_HOST"
             echo ""
           fi
 
@@ -120,28 +144,32 @@ jobs:
             echo ""
             echo "Common fixes:"
             echo ""
-            echo "1. ✅ RECOMMENDED: Use DIRECT connection (not pooler) for GitHub Actions"
-            echo "   Supabase → Settings → Database → Connection String"
-            echo "   Format: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres"
-            echo "   (Note: NOT pooler.supabase.com - use db.[PROJECT].supabase.co)"
+            echo "1. ✅ RECOMMENDED: Use Neon (neon.tech) - Works perfectly with GitHub Actions"
             echo ""
-            echo "   Why: Supabase poolers have SASL authentication issues with sqlx"
-            echo "   - Direct connection works reliably with migrations"
-            echo "   - Pooler is better for local dev, direct for CI/CD"
+            echo "   Connection String Format:"
+            echo "   postgresql://[USER]:[PASSWORD]@[HOST]/[DATABASE]?sslmode=require"
             echo ""
-            echo "2. If you see 'expected SASLFinal' or SASL authentication errors:"
-            echo "   - You're using the pooler (pooler.supabase.com)"
-            echo "   - Switch to direct connection (db.[PROJECT].supabase.co)"
+            echo "   Steps:"
+            echo "   a) Go to https://neon.tech and create a free account"
+            echo "   b) Create a new project"
+            echo "   c) Get connection string from Dashboard → Connection Details"
+            echo "   d) Choose 'Pooled connection' for better performance"
+            echo "   e) Remove 'channel_binding=require' if present (not supported by sqlx)"
+            echo "   f) Update your DATABASE_URL GitHub secret"
             echo ""
-            echo "3. If you see 'prepared statement already exists' error:"
-            echo "   - You're using Transaction mode (port 6543)"
-            echo "   - Switch to direct connection"
+            echo "   Why Neon:"
+            echo "   - Built in Rust (native sqlx compatibility)"
+            echo "   - No SASL authentication issues"
+            echo "   - Works on GitHub Actions out of the box (IPv4 support)"
+            echo "   - Generous FREE tier (512MB storage, unlimited projects)"
+            echo "   - Serverless-first (perfect for scheduled workflows)"
             echo ""
-            echo "4. Check Supabase Project Settings:"
-            echo "   - Database → Settings: IPv4 Add-on enabled (free tier requirement)"
-            echo "   - Project Settings: Ensure project is not paused"
+            echo "2. If using Supabase:"
+            echo "   - Supabase has SASL authentication issues with sqlx"
+            echo "   - Direct connections require paid IPv4 add-on ($4/mo)"
+            echo "   - Consider switching to Neon for better CI/CD support"
             echo ""
-            echo "5. URL-encode special characters in password"
+            echo "3. URL-encode special characters in password"
             echo "   Example: p@ssw0rd! becomes p%40ssw0rd%21"
             exit 1
           fi

@@ -9,22 +9,33 @@ pub struct Database {
 
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
-        info!("Connecting to PostgreSQL database (Supabase)");
+        info!("Connecting to PostgreSQL database");
 
         // Parse connection options from URL
         let connect_options = PgConnectOptions::from_str(database_url)
             .context("Failed to parse DATABASE_URL")?
             // Disable statement caching for memory efficiency
-            // For Supabase in CI/CD (GitHub Actions):
-            //   - Use DIRECT connection: postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres
-            //   - Supabase poolers have SASL authentication issues with sqlx
-            // For local development:
-            //   - Can use pooler Session mode if needed
-            //   - Or use direct connection (more reliable)
+            // For Neon (RECOMMENDED for serverless/GitHub Actions):
+            //   Connection String Format:
+            //     postgresql://[USER]:[PASSWORD]@[HOST]/[DATABASE]?sslmode=require
+            //
+            //   Get connection string from: Neon Console → Dashboard → Connection Details
+            //   - Choose "Pooled connection" for better performance
+            //   - sslmode=require is required by Neon
+            //   - Remove channel_binding parameter (not supported by sqlx)
+            //
+            //   Why Neon works great:
+            //   - Built in Rust (native sqlx compatibility)
+            //   - No SASL authentication issues
+            //   - IPv4 support out of the box (works on GitHub Actions)
+            //   - Generous free tier (512MB storage, unlimited projects)
+            //   - Serverless-first design (perfect for scheduled workflows)
+            //
+            // See: https://neon.tech/docs for more details
             .statement_cache_capacity(0);
 
         let pool = PgPoolOptions::new()
-            // Supabase has connection limits - use smaller pool
+            // Small pool for serverless/GitHub Actions efficiency
             .max_connections(5)
             .min_connections(1)
             // Connection timeout for network latency

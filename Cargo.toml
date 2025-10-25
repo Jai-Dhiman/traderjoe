@@ -15,6 +15,10 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-retry = "0.3"
 
 # Database
+# Using Neon (neon.tech) for PostgreSQL
+# - Excellent sqlx compatibility (built in Rust)
+# - Works great with GitHub Actions (no IPv4/SASL issues)
+# - Generous free tier for serverless workflows
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "migrate", "uuid", "chrono", "json", "bigdecimal"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 bigdecimal = "0.3"
