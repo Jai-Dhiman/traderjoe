@@ -68,8 +68,8 @@ jobs:
             echo "✅ Network connection to $DB_HOST:$DB_PORT successful"
           else
             echo "⚠️  Cannot establish TCP connection to $DB_HOST:$DB_PORT"
-            echo ""
-            echo "This indicates a network/firewall issue:"
+            echo "This indicates a network/firewall issue"
+          fi
 
           echo ""
 
