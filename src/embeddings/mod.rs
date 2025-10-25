@@ -1,51 +1,75 @@
-//! Embeddings module using GitHub Models API
-//! Provides text embeddings via OpenAI-compatible text-embedding-3-small model
+//! Embeddings module using Cloudflare Workers AI
+//! Provides text embeddings via @cf/baai/bge-base-en-v1.5 model (768 dimensions)
 
 use anyhow::Result;
-use async_openai::{
-    config::OpenAIConfig,
-    types::{CreateEmbeddingRequestArgs, EmbeddingInput},
-    Client as OpenAIClient,
-};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
-/// Text embedder using GitHub Models API
+/// Request payload for Cloudflare Workers AI embeddings
+#[derive(Debug, Serialize)]
+struct EmbeddingRequest {
+    text: Vec<String>,
+}
+
+/// Response from Cloudflare Workers AI embeddings
+#[derive(Debug, Deserialize)]
+struct EmbeddingResponse {
+    result: EmbeddingResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingResult {
+    shape: Vec<usize>,
+    data: Vec<Vec<f32>>,
+}
+
+/// Text embedder using Cloudflare Workers AI
 pub struct EmbeddingGemma {
-    client: OpenAIClient<OpenAIConfig>,
+    client: reqwest::Client,
+    account_id: String,
+    api_token: String,
     model_name: String,
     cache: Arc<RwLock<HashMap<String, Vec<f32>>>>,
     dimension: usize,
 }
 
 impl EmbeddingGemma {
-    /// Initialize embedder with GitHub Models provider
-    pub async fn from_github_models(api_key: String) -> Result<Self> {
-        info!("Initializing GitHub Models embeddings (text-embedding-3-small)");
+    /// Initialize embedder with Cloudflare Workers AI
+    pub async fn from_cloudflare(account_id: String, api_token: String) -> Result<Self> {
+        info!("Initializing Cloudflare Workers AI embeddings (@cf/baai/bge-base-en-v1.5)");
 
-        let config = OpenAIConfig::new()
-            .with_api_key(&api_key)
-            .with_api_base("https://models.inference.ai.azure.com");
-
-        let client = OpenAIClient::with_config(config);
+        let client = reqwest::Client::new();
 
         Ok(Self {
             client,
-            model_name: "text-embedding-3-small".to_string(),
+            account_id,
+            api_token,
+            model_name: "@cf/baai/bge-base-en-v1.5".to_string(),
             cache: Arc::new(RwLock::new(HashMap::new())),
-            dimension: 1536, // text-embedding-3-small dimension
+            dimension: 768, // bge-base-en-v1.5 dimension
         })
     }
 
-    /// Alias for from_github_models for backwards compatibility
+    /// Alias for backwards compatibility - uses Cloudflare Workers AI
     pub async fn load() -> Result<Self> {
-        let api_key = std::env::var("GITHUB_TOKEN")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN or OPENAI_API_KEY not set"))?;
+        let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID")
+            .map_err(|_| anyhow::anyhow!("CLOUDFLARE_ACCOUNT_ID not set"))?;
+        let api_token = std::env::var("CLOUDFLARE_API_TOKEN")
+            .map_err(|_| anyhow::anyhow!("CLOUDFLARE_API_TOKEN not set"))?;
 
-        Self::from_github_models(api_key).await
+        Self::from_cloudflare(account_id, api_token).await
+    }
+
+    /// Backwards compatibility alias
+    pub async fn from_github_models(api_key: String) -> Result<Self> {
+        // Try to get Cloudflare credentials from environment
+        let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID")
+            .map_err(|_| anyhow::anyhow!("CLOUDFLARE_ACCOUNT_ID not set. Migration required: use Cloudflare Workers AI instead of GitHub Models."))?;
+
+        Self::from_cloudflare(account_id, api_key).await
     }
 
     /// Generate embeddings for text
@@ -58,22 +82,42 @@ impl EmbeddingGemma {
             }
         }
 
-        // Generate embedding
-        let request = CreateEmbeddingRequestArgs::default()
-            .model(&self.model_name)
-            .input(EmbeddingInput::String(text.to_string()))
-            .build()?;
+        // Generate embedding using Workers AI
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/accounts/{}/ai/run/{}",
+            self.account_id, self.model_name
+        );
 
-        let response = self.client.embeddings().create(request).await?;
+        let request_body = EmbeddingRequest {
+            text: vec![text.to_string()],
+        };
 
-        let embedding: Vec<f32> = response
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_token))
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(anyhow::anyhow!(
+                "Cloudflare Workers AI request failed with status {}: {}",
+                status,
+                error_text
+            ));
+        }
+
+        let embedding_response: EmbeddingResponse = response.json().await?;
+
+        let embedding = embedding_response
+            .result
             .data
             .first()
             .ok_or_else(|| anyhow::anyhow!("No embedding returned"))?
-            .embedding
-            .iter()
-            .map(|&v| v as f32)
-            .collect();
+            .clone();
 
         info!(
             "Generated embedding with {} dimensions for text (first 50 chars): {}",
@@ -92,20 +136,47 @@ impl EmbeddingGemma {
 
     /// Generate batch embeddings efficiently
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let texts_owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
 
-        let request = CreateEmbeddingRequestArgs::default()
-            .model(&self.model_name)
-            .input(EmbeddingInput::StringArray(texts_owned))
-            .build()?;
+        // Cloudflare Workers AI supports up to 100 texts per batch
+        if texts.len() > 100 {
+            return Err(anyhow::anyhow!(
+                "Batch size {} exceeds maximum of 100",
+                texts.len()
+            ));
+        }
 
-        let response = self.client.embeddings().create(request).await?;
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/accounts/{}/ai/run/{}",
+            self.account_id, self.model_name
+        );
 
-        let embeddings: Vec<Vec<f32>> = response
-            .data
-            .iter()
-            .map(|data| data.embedding.iter().map(|&v| v as f32).collect())
-            .collect();
+        let request_body = EmbeddingRequest {
+            text: texts.iter().map(|s| s.to_string()).collect(),
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_token))
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(anyhow::anyhow!(
+                "Cloudflare Workers AI batch request failed with status {}: {}",
+                status,
+                error_text
+            ));
+        }
+
+        let embedding_response: EmbeddingResponse = response.json().await?;
+        let embeddings = embedding_response.result.data;
 
         info!(
             "Generated {} embeddings with {} dimensions",
@@ -150,7 +221,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore] // Ignore by default - requires API key
+    #[ignore] // Ignore by default - requires API credentials
     async fn test_embedding_generation() {
         let embedder = EmbeddingGemma::load()
             .await
@@ -163,7 +234,7 @@ mod tests {
             .expect("Failed to generate embedding");
 
         // Check dimension
-        assert_eq!(embedding.len(), 1536);
+        assert_eq!(embedding.len(), 768);
 
         // Check deterministic - same text should produce same embedding (from cache)
         let embedding2 = embedder
@@ -174,7 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Ignore by default - requires API key
+    #[ignore] // Ignore by default - requires API credentials
     async fn test_batch_embedding() {
         let embedder = EmbeddingGemma::load()
             .await
@@ -188,7 +259,7 @@ mod tests {
 
         assert_eq!(embeddings.len(), 3);
         for embedding in &embeddings {
-            assert_eq!(embedding.len(), 1536);
+            assert_eq!(embedding.len(), 768);
         }
 
         // Different texts should produce different embeddings
@@ -196,7 +267,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Ignore by default - requires API key
+    #[ignore] // Ignore by default - requires API credentials
     async fn test_caching() {
         let embedder = EmbeddingGemma::load()
             .await

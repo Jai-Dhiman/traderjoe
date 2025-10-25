@@ -21,7 +21,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
     permissions:
       contents: read
-      models: write  # Required for GitHub Models API
 
     steps:
       - name: Checkout code
@@ -82,7 +81,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}

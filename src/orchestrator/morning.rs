@@ -46,13 +46,15 @@ impl MorningOrchestrator {
             config.apis.reddit_client_secret.clone(),
         );
 
-        // Initialize embedder based on available credentials
-        let embedder = if let Some(github_token) = config.apis.github_token.clone() {
-            info!("Using GitHub Models for embeddings (cloud mode)");
-            EmbeddingGemma::from_github_models(github_token).await?
+        // Initialize embedder using Cloudflare Workers AI
+        let embedder = if let (Some(cf_account_id), Some(cf_api_token)) = (
+            config.apis.cloudflare_account_id.clone(),
+            config.apis.cloudflare_api_token.clone(),
+        ) {
+            info!("Using Cloudflare Workers AI for embeddings (@cf/baai/bge-base-en-v1.5, 768 dimensions)");
+            EmbeddingGemma::from_cloudflare(cf_account_id, cf_api_token).await?
         } else {
-            info!("No GitHub token found, using local EmbeddingGemma (development mode)");
-            EmbeddingGemma::load().await?
+            return Err(anyhow::anyhow!("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required for embeddings"));
         };
 
         let vector_store = VectorStore::new(pool.clone()).await?;

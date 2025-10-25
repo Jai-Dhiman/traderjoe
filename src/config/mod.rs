@@ -27,6 +27,8 @@ pub struct ApiConfig {
     pub anthropic_api_key: Option<String>,
     pub cerebras_api_key: Option<String>,
     pub github_token: Option<String>,
+    pub cloudflare_account_id: Option<String>,
+    pub cloudflare_api_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +79,8 @@ impl Config {
                 anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
                 cerebras_api_key: env::var("CEREBRAS_API_KEY").ok(),
                 github_token: env::var("GITHUB_TOKEN").ok(),
+                cloudflare_account_id: env::var("CLOUDFLARE_ACCOUNT_ID").ok(),
+                cloudflare_api_token: env::var("CLOUDFLARE_API_TOKEN").ok(),
             },
             llm: LlmConfig {
                 provider: {
@@ -146,6 +150,8 @@ impl Default for Config {
                 anthropic_api_key: None,
                 cerebras_api_key: None,
                 github_token: None,
+                cloudflare_account_id: None,
+                cloudflare_api_token: None,
             },
             llm: LlmConfig {
                 provider: "cerebras".to_string(),
