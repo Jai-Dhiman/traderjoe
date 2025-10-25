@@ -48,45 +48,17 @@ jobs:
 
           if [ -z "$DATABASE_URL" ]; then
             echo "❌ ERROR: DATABASE_URL secret is not set!"
+            exit 1
           fi
 
-          echo "✅ DATABASE_URL secret is set (length: ${#DATABASE_URL} characters)"
-          echo ""
+          echo "✅ DATABASE_URL secret is set"
 
-          # Extract host from DATABASE_URL for network testing
-          DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^:]+):.*|\1|')
-          DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
-
-          echo "📡 Network diagnostics:"
-          echo "Host: $DB_HOST"
-          echo "Port: $DB_PORT"
-          echo ""
-
-          # Check if we can reach the host
-          echo "Testing network connectivity..."
-          if timeout 10 bash -c "cat < /dev/null > /dev/tcp/$DB_HOST/$DB_PORT" 2>/dev/null; then
-            echo "✅ Network connection to $DB_HOST:$DB_PORT successful"
-          else
-            echo "⚠️  Cannot establish TCP connection to $DB_HOST:$DB_PORT"
-            echo "This indicates a network/firewall issue"
-          fi
-
-          echo ""
-
-          echo "Testing database connection with actual error output..."
-          echo "Running: ./target/release/traderjoe --help"
-          echo "----------------------------------------"
-
-          # Run the command and capture full output
+          echo "Testing database connection with traderjoe --help..."
           if ./target/release/traderjoe --help 2>&1; then
-            echo "----------------------------------------"
             echo "✅ Database connection successful!"
           else
-            EXIT_CODE=$?
-            echo "----------------------------------------"
-            echo "❌ Database connection failed with exit code: $EXIT_CODE"
-            echo ""
-
+            echo "❌ Database connection failed"
+            exit 1
           fi
 
       - name: Fetch Latest Market Data
