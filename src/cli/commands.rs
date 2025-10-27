@@ -182,6 +182,15 @@ pub async fn execute(pool: PgPool, recommendation_id: Uuid) -> Result<()> {
     // Update account balance
     // (Balance will be updated when trade is closed)
 
+    // Mark recommendation as executed in trading_recommendations table
+    sqlx::query(
+        "UPDATE trading_recommendations SET executed = true WHERE ace_context_id = $1"
+    )
+    .bind(recommendation_id)
+    .execute(&pool)
+    .await
+    .ok(); // Ignore errors - this is not critical
+
     // Display confirmation
     println!("\n✅ Paper Trade Executed Successfully");
     println!("\n╔════════════════════════════════════════════════════════════╗");

@@ -20,7 +20,7 @@ use crate::{
 
 /// Morning analysis orchestrator
 pub struct MorningOrchestrator {
-    _pool: PgPool,  // Kept for potential future use
+    pool: PgPool,
     _config: Config,  // Kept for potential future use
     market_client: MarketDataClient,
     research_client: ResearchClient,
@@ -70,7 +70,7 @@ impl MorningOrchestrator {
         info!("Morning Orchestrator initialized successfully");
 
         Ok(Self {
-            _pool: pool,
+            pool,
             _config: config,
             market_client,
             research_client,
@@ -166,7 +166,14 @@ impl MorningOrchestrator {
             )
             .await?;
 
-        // Step 9: Display results
+        // Step 9: Persist trading recommendation
+        info!("💾 Persisting trading recommendation...");
+        if let Err(e) = self.persist_trading_recommendation(symbol, &decision, context_id).await {
+            warn!("Failed to persist trading recommendation: {}", e);
+            // Continue - this is not a fatal error
+        }
+
+        // Step 10: Display results
         self.display_analysis_results(&decision, context_id, &similar_contexts)
             .await;
 
@@ -621,5 +628,57 @@ impl MorningOrchestrator {
         } else {
             info!("✅ All external services healthy (Research, Sentiment)");
         }
+    }
+
+    /// Persist trading recommendation to the database
+    async fn persist_trading_recommendation(
+        &self,
+        symbol: &str,
+        decision: &TradingDecision,
+        context_id: uuid::Uuid,
+    ) -> Result<()> {
+        use sqlx::query;
+
+        // Calculate position size percentage (90% for high confidence, 70% for medium, 50% for low)
+        let position_size_pct = if decision.confidence >= 0.8 {
+            0.9
+        } else if decision.confidence >= 0.6 {
+            0.7
+        } else {
+            0.5
+        };
+
+        // Insert into trading_recommendations table
+        query(
+            r#"
+            INSERT INTO trading_recommendations (
+                symbol,
+                recommendation,
+                confidence,
+                reasoning,
+                position_size_pct,
+                ace_context_id,
+                executed
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(symbol)
+        .bind(&decision.action)
+        .bind(decision.confidence as f32)
+        .bind(&decision.reasoning)
+        .bind(position_size_pct as f32)
+        .bind(context_id)
+        .bind(false) // Initially not executed
+        .execute(&self.pool)
+        .await?;
+
+        info!(
+            "Trading recommendation persisted: {} for {} (confidence: {:.1}%)",
+            decision.action,
+            symbol,
+            decision.confidence * 100.0
+        );
+
+        Ok(())
     }
 }

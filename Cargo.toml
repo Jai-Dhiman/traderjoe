@@ -30,7 +30,6 @@ colored = "2.0"
 # HTTP Client & APIs
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 url = "2.4"
-roux = "2.2"  # Reddit API client
 urlencoding = "2.1"  # URL encoding for API queries
 
 # Serialization

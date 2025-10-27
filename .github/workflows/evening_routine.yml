@@ -25,6 +25,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check if Market Day
+        id: market_check
+        run: |
+          # Get current day of week (1=Monday, ..., 7=Sunday)
+          DOW=$(date -u +%u)
+
+          # Get current date for logging
+          DATE_ET=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S %Z')
+          echo "Current time: $DATE_ET"
+
+          # Check if it's a weekday (Mon-Fri = 1-5)
+          if [ $DOW -ge 6 ]; then
+            echo "🚫 Market is closed (weekend: day $DOW)"
+            echo "Skipping workflow to save API credits"
+            exit 0  # Exit gracefully, not as failure
+          fi
+
+          echo "✅ Market day - proceeding with evening review"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

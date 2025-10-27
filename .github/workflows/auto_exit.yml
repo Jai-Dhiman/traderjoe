@@ -25,6 +25,40 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check if Market is Open
+        id: market_check
+        run: |
+          # Get current day of week (1=Monday, ..., 7=Sunday)
+          DOW=$(date -u +%u)
+
+          # Get current hour in ET using America/New_York timezone
+          HOUR_ET=$(TZ=America/New_York date +%H)
+          MINUTE_ET=$(TZ=America/New_York date +%M)
+
+          # Get current date for logging
+          DATE_ET=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S %Z')
+          echo "Current time: $DATE_ET"
+
+          # Check if it's a weekday (Mon-Fri = 1-5)
+          if [ $DOW -ge 6 ]; then
+            echo "🚫 Market is closed (weekend: day $DOW)"
+            echo "Skipping workflow to save API credits"
+            exit 0  # Exit gracefully, not as failure
+          fi
+
+          # Auto-exit should run during market hours (9:30-16:00 ET)
+          CURRENT_MINUTES=$((10#$HOUR_ET * 60 + 10#$MINUTE_ET))
+          MARKET_OPEN_MINUTES=$((9 * 60 + 30))  # 9:30 AM
+          MARKET_CLOSE_MINUTES=$((16 * 60))     # 4:00 PM
+
+          if [ $CURRENT_MINUTES -lt $MARKET_OPEN_MINUTES ] || [ $CURRENT_MINUTES -ge $MARKET_CLOSE_MINUTES ]; then
+            echo "🚫 Market is closed (current: ${HOUR_ET}:${MINUTE_ET} ET)"
+            echo "Skipping workflow to save API credits"
+            exit 0  # Exit gracefully
+          fi
+
+          echo "✅ Market is open (${HOUR_ET}:${MINUTE_ET} ET) - proceeding with auto-exit checks"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

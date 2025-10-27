@@ -1,7 +1,7 @@
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
-use roux::Subreddit;
 use super::{DataError, DataResult};
 
 /// Lexicon-based sentiment keywords (simple approach)
@@ -15,18 +15,42 @@ const BEARISH_WORDS: &[&str] = &[
     "red", "loss", "weak", "drop", "fall", "decline", "correction"
 ];
 
+/// Reddit API response structures
+#[derive(Debug, Deserialize)]
+struct RedditListing {
+    data: RedditListingData,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditListingData {
+    children: Vec<RedditPost>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditPost {
+    data: RedditPostData,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditPostData {
+    title: String,
+    selftext: String,
+    ups: i64,
+    permalink: String,
+}
+
 pub struct SentimentClient {
     pool: PgPool,
     reddit_client_id: Option<String>,
     reddit_client_secret: Option<String>,
-    _http_client: reqwest::Client,
+    http_client: reqwest::Client,
 }
 
 impl SentimentClient {
     pub fn new(pool: PgPool, client_id: Option<String>, client_secret: Option<String>) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent("traderjoe/0.1.0")
+            .user_agent("traderjoe/0.1.0 (by /u/traderjoe_bot)")
             .build()
             .expect("Failed to build HTTP client");
 
@@ -34,7 +58,7 @@ impl SentimentClient {
             pool,
             reddit_client_id: client_id,
             reddit_client_secret: client_secret,
-            _http_client: http_client,
+            http_client,
         }
     }
 
@@ -61,7 +85,7 @@ impl SentimentClient {
         }
     }
 
-    /// Fetch sentiment from Reddit using roux library
+    /// Fetch sentiment from Reddit using direct API calls
     async fn fetch_reddit_sentiment(&self, symbol: &str) -> DataResult<serde_json::Value> {
         use super::retry::retry_with_backoff;
 
@@ -74,39 +98,56 @@ impl SentimentClient {
             let mut post_count = 0;
 
             for sub in subreddits {
-                // Fetch hot posts from subreddit
-                let subreddit = Subreddit::new(sub);
+                // Fetch hot posts from subreddit using Reddit JSON API
+                let url = format!("https://www.reddit.com/r/{}/hot.json?limit=25", sub);
 
-                match subreddit.hot(25, None).await {
-                    Ok(posts) => {
-                        for post in posts.data.children {
-                            let title = post.data.title.to_lowercase();
-                            let selftext = post.data.selftext.to_lowercase();
-                            let combined = format!("{} {}", title, selftext);
+                match self.http_client
+                    .get(&url)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        if !response.status().is_success() {
+                            tracing::warn!("Failed to fetch from r/{}: HTTP {}", sub, response.status());
+                            continue;
+                        }
 
-                            // Check if post mentions the symbol
-                            if combined.contains(&symbol.to_lowercase())
-                                || combined.contains(&format!("${}", symbol.to_lowercase())) {
+                        match response.json::<RedditListing>().await {
+                            Ok(listing) => {
+                                for post in listing.data.children {
+                                    let title = post.data.title.to_lowercase();
+                                    let selftext = post.data.selftext.to_lowercase();
+                                    let combined = format!("{} {}", title, selftext);
 
-                                // Calculate sentiment score for this post
-                                let sentiment_score = self.calculate_sentiment(&combined);
+                                    // Check if post mentions the symbol
+                                    if combined.contains(&symbol.to_lowercase())
+                                        || combined.contains(&format!("${}", symbol.to_lowercase())) {
 
-                                // Weight by upvotes (more upvotes = more influence)
-                                let weight = (post.data.ups as f64).ln().max(1.0);
-                                total_score += sentiment_score * weight;
-                                post_count += 1;
+                                        // Calculate sentiment score for this post
+                                        let sentiment_score = self.calculate_sentiment(&combined);
 
-                                all_posts.push(json!({
-                                    "title": post.data.title,
-                                    "score": post.data.ups,
-                                    "sentiment": sentiment_score,
-                                    "subreddit": sub,
-                                    "url": format!("https://reddit.com{}", post.data.permalink),
-                                }));
+                                        // Weight by upvotes (more upvotes = more influence)
+                                        let weight = (post.data.ups as f64).ln().max(1.0);
+                                        total_score += sentiment_score * weight;
+                                        post_count += 1;
 
-                                if post_count >= 20 {
-                                    break;
+                                        all_posts.push(json!({
+                                            "title": post.data.title,
+                                            "score": post.data.ups,
+                                            "sentiment": sentiment_score,
+                                            "subreddit": sub,
+                                            "url": format!("https://reddit.com{}", post.data.permalink),
+                                        }));
+
+                                        if post_count >= 20 {
+                                            break;
+                                        }
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to parse response from r/{}: {}", sub, e);
+                                continue;
                             }
                         }
                     }

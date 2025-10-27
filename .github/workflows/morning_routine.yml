@@ -2,9 +2,9 @@ name: Morning Trading Routine
 
 on:
   schedule:
-    # Run at 6:30 AM PST (9:30 AM ET) on weekdays
-    # PST is UTC-8, so 6:30 AM PST = 14:30 UTC (2:30 PM UTC)
-    - cron: "30 14 * * 1-5"
+    # Run at 9:45 AM ET on weekdays only (after market open at 9:30 AM ET)
+    # ET is UTC-5 (EST) or UTC-4 (EDT), using 14:45 UTC to work year-round
+    - cron: "45 14 * * 1-5"
   workflow_dispatch: # Allow manual trigger for testing
 
 env:
@@ -25,6 +25,47 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Check if Market is Open
+        id: market_check
+        run: |
+          # Get current day of week (1=Monday, ..., 7=Sunday)
+          DOW=$(date -u +%u)
+
+          # Get current hour in ET using America/New_York timezone
+          HOUR_ET=$(TZ=America/New_York date +%H)
+          MINUTE_ET=$(TZ=America/New_York date +%M)
+
+          # Get current date for logging
+          DATE_ET=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S %Z')
+          echo "Current time: $DATE_ET"
+
+          # Check if it's a weekday (Mon-Fri = 1-5)
+          if [ $DOW -ge 6 ]; then
+            echo "🚫 Market is closed (weekend: day $DOW)"
+            echo "Skipping workflow to save API credits"
+            exit 0  # Exit gracefully, not as failure
+          fi
+
+          # Market hours are 09:30-16:00 ET
+          # Convert to minutes for precise check
+          CURRENT_MINUTES=$((10#$HOUR_ET * 60 + 10#$MINUTE_ET))
+          MARKET_OPEN_MINUTES=$((9 * 60 + 30))  # 9:30 AM
+          MARKET_CLOSE_MINUTES=$((16 * 60))     # 4:00 PM
+
+          if [ $CURRENT_MINUTES -lt $MARKET_OPEN_MINUTES ]; then
+            echo "🚫 Market is not open yet (current: ${HOUR_ET}:${MINUTE_ET} ET, opens at 09:30 ET)"
+            echo "Skipping workflow to save API credits"
+            exit 0  # Exit gracefully
+          fi
+
+          if [ $CURRENT_MINUTES -ge $MARKET_CLOSE_MINUTES ]; then
+            echo "🚫 Market is closed (current: ${HOUR_ET}:${MINUTE_ET} ET, closed at 16:00 ET)"
+            echo "Skipping workflow to save API credits"
+            exit 0  # Exit gracefully
+          fi
+
+          echo "✅ Market is open (${HOUR_ET}:${MINUTE_ET} ET) - proceeding with workflow"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
