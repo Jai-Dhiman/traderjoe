@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::env;
 
@@ -8,6 +9,14 @@ pub struct Config {
     pub apis: ApiConfig,
     pub llm: LlmConfig,
     pub trading: TradingConfig,
+
+    // Backtest mode configuration (set programmatically, not from env vars)
+    #[serde(skip)]
+    pub backtest_mode: Option<bool>,
+    #[serde(skip)]
+    pub backtest_date: Option<NaiveDate>,
+    #[serde(skip)]
+    pub skip_sentiment: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,20 +31,15 @@ pub struct ApiConfig {
     pub exa_api_key: Option<String>,
     pub reddit_client_id: Option<String>,
     pub reddit_client_secret: Option<String>,
-    pub news_api_key: Option<String>,
-    pub openai_api_key: Option<String>,
-    pub anthropic_api_key: Option<String>,
-    pub cerebras_api_key: Option<String>,
-    pub github_token: Option<String>,
     pub cloudflare_account_id: Option<String>,
     pub cloudflare_api_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    pub provider: String, // "cerebras" or "openrouter"
-    pub cerebras_url: String,
-    pub openrouter_url: String,
+    pub provider: String, // "workers_ai" or "ollama"
+    pub workers_ai_url: String,
+    pub ollama_url: String,
     pub primary_model: String,
     pub fallback_model: String,
     pub timeout_seconds: u64,
@@ -74,33 +78,28 @@ impl Config {
                 exa_api_key: env::var("EXA_API_KEY").ok(),
                 reddit_client_id: env::var("REDDIT_CLIENT_ID").ok(),
                 reddit_client_secret: env::var("REDDIT_CLIENT_SECRET").ok(),
-                news_api_key: env::var("NEWS_API_KEY").ok(),
-                openai_api_key: env::var("OPENAI_API_KEY").ok(),
-                anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
-                cerebras_api_key: env::var("CEREBRAS_API_KEY").ok(),
-                github_token: env::var("GITHUB_TOKEN").ok(),
                 cloudflare_account_id: env::var("CLOUDFLARE_ACCOUNT_ID").ok(),
                 cloudflare_api_token: env::var("CLOUDFLARE_API_TOKEN").ok(),
             },
             llm: LlmConfig {
                 provider: {
-                    let provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "cerebras".to_string());
+                    let provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "workers_ai".to_string());
                     eprintln!("🔧 Config: LLM_PROVIDER = {}", provider);
                     provider
                 },
-                cerebras_url: env::var("CEREBRAS_URL")
-                    .unwrap_or_else(|_| "https://api.cerebras.ai/v1".to_string()),
-                openrouter_url: env::var("OPENROUTER_URL")
-                    .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
+                workers_ai_url: env::var("WORKERS_AI_URL")
+                    .unwrap_or_else(|_| "https://api.cloudflare.com/client/v4/accounts".to_string()),
+                ollama_url: env::var("OLLAMA_URL")
+                    .unwrap_or_else(|_| "http://localhost:11434/v1".to_string()),
                 primary_model: {
                     let model = env::var("PRIMARY_MODEL")
-                        .unwrap_or_else(|_| "llama-3.3-70b".to_string());
+                        .unwrap_or_else(|_| "@cf/meta/llama-4-scout-17b-16e-instruct".to_string());
                     eprintln!("🔧 Config: PRIMARY_MODEL = {}", model);
                     model
                 },
                 fallback_model: {
                     let model = env::var("FALLBACK_MODEL")
-                        .unwrap_or_else(|_| "llama-3.1-8b".to_string());
+                        .unwrap_or_else(|_| "@cf/meta/llama-4-scout-17b-16e-instruct".to_string());
                     eprintln!("🔧 Config: FALLBACK_MODEL = {}", model);
                     model
                 },
@@ -127,6 +126,10 @@ impl Config {
                     .parse()
                     .context("Invalid MAX_WEEKLY_LOSS_PCT value")?,
             },
+            // Backtest mode is not loaded from env vars - set programmatically
+            backtest_mode: None,
+            backtest_date: None,
+            skip_sentiment: None,
         };
 
         Ok(config)
@@ -145,20 +148,15 @@ impl Default for Config {
                 exa_api_key: None,
                 reddit_client_id: None,
                 reddit_client_secret: None,
-                news_api_key: None,
-                openai_api_key: None,
-                anthropic_api_key: None,
-                cerebras_api_key: None,
-                github_token: None,
                 cloudflare_account_id: None,
                 cloudflare_api_token: None,
             },
             llm: LlmConfig {
-                provider: "cerebras".to_string(),
-                cerebras_url: "https://api.cerebras.ai/v1".to_string(),
-                openrouter_url: "https://openrouter.ai/api/v1".to_string(),
-                primary_model: "llama-3.3-70b".to_string(),
-                fallback_model: "llama-3.1-8b".to_string(),
+                provider: "workers_ai".to_string(),
+                workers_ai_url: "https://api.cloudflare.com/client/v4/accounts".to_string(),
+                ollama_url: "http://localhost:11434".to_string(),
+                primary_model: "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
+                fallback_model: "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
                 timeout_seconds: 30,
             },
             trading: TradingConfig {
@@ -167,6 +165,9 @@ impl Default for Config {
                 max_daily_loss_pct: 3.0,
                 max_weekly_loss_pct: 10.0,
             },
+            backtest_mode: None,
+            backtest_date: None,
+            skip_sentiment: None,
         }
     }
 }

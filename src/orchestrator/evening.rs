@@ -16,7 +16,7 @@ use crate::{
     config::Config,
     data::MarketDataClient,
     llm::LLMClient,
-    trading::PaperTradingEngine,
+    trading::{AccountManager, PaperTradingEngine},
 };
 
 /// Result of evening review analysis
@@ -96,6 +96,7 @@ pub struct EveningOrchestrator {
     _playbook_dao: PlaybookDAO,
     curator: Curator,
     _paper_trading: PaperTradingEngine,
+    account_manager: AccountManager,
 }
 
 impl EveningOrchestrator {
@@ -118,6 +119,7 @@ impl EveningOrchestrator {
         .await?;
 
         let paper_trading = PaperTradingEngine::new(pool.clone());
+        let account_manager = AccountManager::new(pool.clone());
 
         info!("Evening Orchestrator initialized successfully");
 
@@ -129,6 +131,7 @@ impl EveningOrchestrator {
             _playbook_dao: playbook_dao,
             curator,
             _paper_trading: paper_trading,
+            account_manager,
         })
     }
 
@@ -340,6 +343,11 @@ impl EveningOrchestrator {
         context: &crate::ace::context::AceContext,
         decision: &TradingDecision,
     ) -> Result<TradingOutcome> {
+        // For backtest mode: close any open trades for this context before computing outcome
+        if let Some(true) = self._config.backtest_mode {
+            self.close_open_context_trades(context).await?;
+        }
+
         // First, try to get actual trade execution data from paper trading engine
         let paper_trade_outcome = self._paper_trading.get_context_outcome(context.id).await;
 
@@ -433,6 +441,73 @@ impl EveningOrchestrator {
         })
     }
 
+    /// Close any open trades associated with this context (for backtest mode)
+    async fn close_open_context_trades(
+        &self,
+        context: &crate::ace::context::AceContext,
+    ) -> Result<()> {
+        // Get all open positions
+        let open_positions = self._paper_trading.get_open_positions().await?;
+
+        // Find trades for this context
+        let context_trades: Vec<_> = open_positions
+            .iter()
+            .filter(|trade| trade.context_id == Some(context.id))
+            .collect();
+
+        if context_trades.is_empty() {
+            debug!("No open trades found for context {}", context.id);
+            return Ok(());
+        }
+
+        info!("Found {} open trade(s) for context {}, closing with backtest mode exit price",
+              context_trades.len(), context.id);
+
+        // Get symbol from context
+        let symbol = context
+            .market_state
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing symbol in market state"))?;
+
+        // Fetch exit price - use backtest_date if in backtest mode
+        let current_data = if let Some(backtest_date) = self._config.backtest_date {
+            info!("Fetching exit price for backtest date: {}", backtest_date);
+            self.market_client
+                .fetch_for_date(symbol, backtest_date)
+                .await
+                .context("Failed to fetch exit price for closing trade")?
+        } else {
+            self.market_client
+                .fetch_latest(symbol)
+                .await
+                .context("Failed to fetch exit price for closing trade")?
+        };
+
+        let exit_price = current_data
+            .get("close")
+            .and_then(|c| c.as_f64())
+            .ok_or_else(|| anyhow::anyhow!("Missing close price in market data"))?;
+
+        // Close each trade
+        for trade in context_trades {
+            info!("Closing trade {} at exit price ${:.2}", trade.id, exit_price);
+            let closed_trade = self._paper_trading
+                .exit_trade(
+                    trade.id,
+                    exit_price,
+                    crate::trading::ExitReason::AutoExit,
+                )
+                .await?;
+
+            // Update account balance with P&L from this trade
+            self.account_manager.update_balance(&closed_trade).await?;
+            info!("Updated account balance after trade {} closed", trade.id);
+        }
+
+        Ok(())
+    }
+
     /// Get maximum favorable/adverse excursion if tracked
     async fn get_excursions(&self, context_id: Uuid) -> Result<(Option<f64>, Option<f64>)> {
         // This would query the paper trading engine for tracked excursions
@@ -460,6 +535,23 @@ impl EveningOrchestrator {
             "total_pnl": stats.get("total_pnl"),
             "avg_duration_hours": stats.get("avg_duration_hours"),
         }))
+    }
+
+    /// Review a specific context at a historical date (used in backtesting)
+    /// This computes the actual outcome using next day's market data
+    pub async fn review_context_at_date(
+        &self,
+        context_id: Uuid,
+        outcome_date: chrono::NaiveDate,
+    ) -> Result<EveningReviewResult> {
+        info!(
+            "🌙 Starting historical review for context {} using outcome from {}",
+            context_id, outcome_date
+        );
+
+        // For backtest mode, we run the regular review
+        // The market_client will fetch data for the outcome_date from config
+        self.review_context(context_id).await
     }
 }
 

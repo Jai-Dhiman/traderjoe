@@ -1,5 +1,5 @@
 //! LLM integration module
-//! Supports cloud providers: Cerebras, OpenRouter
+//! Supports Workers AI (OpenAI-compatible) and native Ollama API
 
 use anyhow::{Context, Result};
 use async_openai::{
@@ -27,12 +27,47 @@ pub struct LLMResponse {
     pub total_tokens: Option<usize>,
 }
 
+/// Ollama API request payload
+#[derive(Debug, Serialize)]
+struct OllamaGenerateRequest {
+    model: String,
+    prompt: String,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+}
+
+/// Ollama API options
+#[derive(Debug, Serialize)]
+struct OllamaOptions {
+    temperature: Option<f32>,
+    num_predict: Option<i32>,
+}
+
+/// Ollama API response
+#[derive(Debug, Deserialize)]
+struct OllamaGenerateResponse {
+    model: String,
+    response: String,
+    done: bool,
+    #[serde(default)]
+    prompt_eval_count: Option<i32>,
+    #[serde(default)]
+    eval_count: Option<i32>,
+    #[serde(default)]
+    total_duration: Option<i64>,
+}
+
 /// LLM client configuration
 #[derive(Debug, Clone)]
 pub struct LLMConfig {
-    pub provider: String, // "cerebras" or "openrouter"
-    pub cerebras_url: String,
-    pub openrouter_url: String,
+    pub provider: String, // "workers_ai" or "ollama"
+    pub workers_ai_url: String,
+    pub workers_ai_account_id: Option<String>,
+    pub workers_ai_api_token: Option<String>,
+    pub ollama_url: String,
     pub primary_model: String,
     pub fallback_model: String,
     pub timeout_seconds: u64,
@@ -43,11 +78,13 @@ pub struct LLMConfig {
 impl Default for LLMConfig {
     fn default() -> Self {
         Self {
-            provider: "cerebras".to_string(),
-            cerebras_url: "https://api.cerebras.ai/v1".to_string(),
-            openrouter_url: "https://openrouter.ai/api/v1".to_string(),
-            primary_model: "llama-3.3-70b".to_string(),
-            fallback_model: "llama-3.1-8b".to_string(),
+            provider: "workers_ai".to_string(),
+            workers_ai_url: "https://api.cloudflare.com/client/v4/accounts".to_string(),
+            workers_ai_account_id: None,
+            workers_ai_api_token: None,
+            ollama_url: "http://localhost:11434".to_string(),
+            primary_model: "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
+            fallback_model: "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
             timeout_seconds: 30,
             max_retries: 3,
             force_retries: false,
@@ -58,8 +95,8 @@ impl Default for LLMConfig {
 /// Provider-specific client enum
 #[derive(Clone)]
 enum ProviderClient {
-    Cerebras(OpenAIClient<OpenAIConfig>),
-    OpenRouter(OpenAIClient<OpenAIConfig>),
+    WorkersAI(OpenAIClient<OpenAIConfig>),
+    Ollama { base_url: String, http_client: reqwest::Client },
 }
 
 /// LLM client supporting multiple providers
@@ -83,35 +120,43 @@ impl LLMClient {
     /// Create new LLM client with configuration
     pub async fn new(config: LLMConfig, api_key: Option<String>) -> Result<Self> {
         let provider = match config.provider.as_str() {
-            "cerebras" => {
-                info!("Initializing Cerebras provider");
-                let api_key = api_key
+            "workers_ai" => {
+                info!("Initializing Cloudflare Workers AI provider");
+
+                let account_id = config.workers_ai_account_id
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("CLOUDFLARE_ACCOUNT_ID is required for Workers AI provider"))?;
+
+                let api_token = api_key
                     .clone()
-                    .ok_or_else(|| anyhow::anyhow!("CEREBRAS_API_KEY is required for Cerebras provider"))?;
+                    .ok_or_else(|| anyhow::anyhow!("CLOUDFLARE_API_TOKEN is required for Workers AI provider"))?;
+
+                // Cloudflare Workers AI uses format: https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1
+                let api_base = format!("{}/{}/ai/v1", config.workers_ai_url, account_id);
 
                 let openai_config = OpenAIConfig::new()
-                    .with_api_key(&api_key)
-                    .with_api_base(&config.cerebras_url);
+                    .with_api_key(&api_token)
+                    .with_api_base(&api_base);
 
                 let client = OpenAIClient::with_config(openai_config);
-                ProviderClient::Cerebras(client)
+                ProviderClient::WorkersAI(client)
             }
-            "openrouter" => {
-                info!("Initializing OpenRouter provider");
-                let api_key = api_key
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("API key is required for OpenRouter provider"))?;
+            "ollama" => {
+                info!("Initializing Ollama provider (native API)");
 
-                let openai_config = OpenAIConfig::new()
-                    .with_api_key(&api_key)
-                    .with_api_base(&config.openrouter_url);
+                let http_client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(config.timeout_seconds))
+                    .build()
+                    .context("Failed to create HTTP client for Ollama")?;
 
-                let client = OpenAIClient::with_config(openai_config);
-                ProviderClient::OpenRouter(client)
+                ProviderClient::Ollama {
+                    base_url: config.ollama_url.clone(),
+                    http_client,
+                }
             }
             _ => {
                 return Err(anyhow::anyhow!(
-                    "Unsupported LLM provider: {}. Use 'cerebras' or 'openrouter'",
+                    "Unsupported LLM provider: {}. Use 'workers_ai' or 'ollama'",
                     config.provider
                 ));
             }
@@ -128,8 +173,10 @@ impl LLMClient {
     pub async fn from_config(config: &crate::config::Config) -> Result<Self> {
         let llm_config = LLMConfig {
             provider: config.llm.provider.clone(),
-            cerebras_url: config.llm.cerebras_url.clone(),
-            openrouter_url: config.llm.openrouter_url.clone(),
+            workers_ai_url: config.llm.workers_ai_url.clone(),
+            workers_ai_account_id: config.apis.cloudflare_account_id.clone(),
+            workers_ai_api_token: config.apis.cloudflare_api_token.clone(),
+            ollama_url: config.llm.ollama_url.clone(),
             primary_model: config.llm.primary_model.clone(),
             fallback_model: config.llm.fallback_model.clone(),
             timeout_seconds: config.llm.timeout_seconds,
@@ -139,8 +186,8 @@ impl LLMClient {
 
         // Get API key based on provider
         let api_key = match llm_config.provider.as_str() {
-            "cerebras" => config.apis.cerebras_api_key.clone(),
-            "openrouter" => config.apis.openai_api_key.clone(), // Reuse openai_api_key for OpenRouter
+            "workers_ai" => config.apis.cloudflare_api_token.clone(),
+            "ollama" => None, // Ollama doesn't need API key
             _ => None,
         };
 
@@ -149,6 +196,11 @@ impl LLMClient {
 
     /// Generate text using specified model with explicit error handling
     pub async fn generate(&self, prompt: &str, model: Option<&str>) -> Result<LLMResponse> {
+        self.generate_internal(prompt, model, false).await
+    }
+
+    /// Internal generate method with JSON mode support
+    async fn generate_internal(&self, prompt: &str, model: Option<&str>, json_mode: bool) -> Result<LLMResponse> {
         let model_name = model.unwrap_or(&self.config.primary_model);
 
         info!(
@@ -161,48 +213,11 @@ impl LLMClient {
         let mut last_error = None;
         for attempt in 1..=self.config.max_retries {
             let result = match &self.provider {
-                ProviderClient::Cerebras(client) | ProviderClient::OpenRouter(client) => {
-                    // Use chat completion for OpenAI-compatible APIs
-                    let messages = vec![ChatCompletionRequestMessage::User(
-                        ChatCompletionRequestUserMessageArgs::default()
-                            .content(prompt)
-                            .build()
-                            .context("Failed to build user message")?,
-                    )];
-
-                    let request = CreateChatCompletionRequestArgs::default()
-                        .model(model_name)
-                        .messages(messages)
-                        .build()
-                        .context("Failed to build chat completion request")?;
-
-                    match timeout(
-                        Duration::from_secs(self.config.timeout_seconds),
-                        client.chat().create(request),
-                    )
-                    .await
-                    {
-                        Ok(Ok(response)) => {
-                            let content = response
-                                .choices
-                                .first()
-                                .and_then(|c| c.message.content.clone())
-                                .ok_or_else(|| anyhow::anyhow!("No content in API response"))?;
-
-                            Ok(LLMResponse {
-                                content,
-                                model: response.model.clone(),
-                                prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens as usize),
-                                completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens as usize),
-                                total_tokens: response.usage.as_ref().map(|u| u.total_tokens as usize),
-                            })
-                        }
-                        Ok(Err(e)) => Err(anyhow::anyhow!("API error: {}", e)),
-                        Err(_) => Err(anyhow::anyhow!(
-                            "Request timeout after {} seconds",
-                            self.config.timeout_seconds
-                        )),
-                    }
+                ProviderClient::WorkersAI(client) => {
+                    self.generate_with_workers_ai(client, prompt, model_name).await
+                }
+                ProviderClient::Ollama { base_url, http_client } => {
+                    self.generate_with_ollama(http_client, base_url, prompt, model_name, json_mode).await
                 }
             };
 
@@ -247,6 +262,104 @@ impl LLMClient {
         }))
     }
 
+    /// Generate using Workers AI (OpenAI-compatible)
+    async fn generate_with_workers_ai(
+        &self,
+        client: &OpenAIClient<OpenAIConfig>,
+        prompt: &str,
+        model_name: &str,
+    ) -> Result<LLMResponse> {
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(prompt)
+                .build()
+                .context("Failed to build user message")?,
+        )];
+
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(model_name)
+            .messages(messages)
+            .build()
+            .context("Failed to build chat completion request")?;
+
+        match timeout(
+            Duration::from_secs(self.config.timeout_seconds),
+            client.chat().create(request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => {
+                let content = response
+                    .choices
+                    .first()
+                    .and_then(|c| c.message.content.clone())
+                    .ok_or_else(|| anyhow::anyhow!("No content in API response"))?;
+
+                Ok(LLMResponse {
+                    content,
+                    model: response.model.clone(),
+                    prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens as usize),
+                    completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens as usize),
+                    total_tokens: response.usage.as_ref().map(|u| u.total_tokens as usize),
+                })
+            }
+            Ok(Err(e)) => Err(anyhow::anyhow!("API error: {}", e)),
+            Err(_) => Err(anyhow::anyhow!(
+                "Request timeout after {} seconds",
+                self.config.timeout_seconds
+            )),
+        }
+    }
+
+    /// Generate using native Ollama API
+    async fn generate_with_ollama(
+        &self,
+        http_client: &reqwest::Client,
+        base_url: &str,
+        prompt: &str,
+        model_name: &str,
+        json_mode: bool,
+    ) -> Result<LLMResponse> {
+        let request_payload = OllamaGenerateRequest {
+            model: model_name.to_string(),
+            prompt: prompt.to_string(),
+            stream: false,
+            format: if json_mode { Some("json".to_string()) } else { None },
+            options: None,
+        };
+
+        let url = format!("{}/api/generate", base_url);
+
+        let response = http_client
+            .post(&url)
+            .json(&request_payload)
+            .send()
+            .await
+            .context("Failed to send request to Ollama")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Ollama API error: {} - {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            ));
+        }
+
+        let ollama_response: OllamaGenerateResponse = response
+            .json()
+            .await
+            .context("Failed to parse Ollama response")?;
+
+        Ok(LLMResponse {
+            content: ollama_response.response,
+            model: ollama_response.model,
+            prompt_tokens: ollama_response.prompt_eval_count.map(|c| c as usize),
+            completion_tokens: ollama_response.eval_count.map(|c| c as usize),
+            total_tokens: ollama_response.prompt_eval_count
+                .and_then(|p| ollama_response.eval_count.map(|e| (p + e) as usize)),
+        })
+    }
+
     /// Generate text with structured JSON output
     pub async fn generate_json<T>(&self, prompt: &str, model: Option<&str>) -> Result<T>
     where
@@ -259,7 +372,8 @@ Please respond with valid JSON only. Do not include any explanation or markdown 
             prompt
         );
 
-        let response = self.generate(&enhanced_prompt, model).await?;
+        // Use JSON mode for Ollama to force JSON output
+        let response = self.generate_internal(&enhanced_prompt, model, true).await?;
 
         // Try to extract JSON from response
         let json_content = extract_json_from_text(&response.content)
@@ -291,20 +405,22 @@ Please respond with valid JSON only. Do not include any explanation or markdown 
     /// Get available models
     pub async fn list_models(&self) -> Result<Vec<String>> {
         match &self.provider {
-            ProviderClient::Cerebras(_) => {
-                // Return known Cerebras models
+            ProviderClient::WorkersAI(_) => {
+                // Return known Cloudflare Workers AI models
                 Ok(vec![
-                    "llama-3.3-70b".to_string(),
-                    "llama-3.1-8b".to_string(),
-                    "llama-3.1-70b".to_string(),
+                    "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
+                    "@cf/meta/llama-3.3-70b-instruct".to_string(),
+                    "@cf/meta/llama-3.1-8b-instruct".to_string(),
                 ])
             }
-            ProviderClient::OpenRouter(_) => {
-                // Return common OpenRouter models
+            ProviderClient::Ollama { .. } => {
+                // Return common Ollama models (user should have these pulled)
                 Ok(vec![
-                    "meta-llama/llama-3.1-70b-instruct".to_string(),
-                    "anthropic/claude-3.5-sonnet".to_string(),
-                    "openai/gpt-4o".to_string(),
+                    "llama4:scout".to_string(),  // Same as @cf/meta/llama-4-scout-17b-16e-instruct
+                    "llama3.2:3b".to_string(),
+                    "llama3.1".to_string(),
+                    "qwen2.5".to_string(),
+                    "mistral".to_string(),
                 ])
             }
         }
@@ -460,36 +576,5 @@ mod tests {
             .with_timezone(&Utc);
 
         assert!(!is_too_close_to_market_close(time));
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires Cerebras API key
-    async fn test_cerebras_integration() {
-        let config = LLMConfig::default();
-        let api_key = std::env::var("CEREBRAS_API_KEY").ok();
-
-        if api_key.is_none() {
-            println!("Skipping test - CEREBRAS_API_KEY not set");
-            return;
-        }
-
-        match LLMClient::new(config, api_key).await {
-            Ok(client) => {
-                // Test basic generation
-                let response = client.generate("Say hello in one word", None).await;
-                match response {
-                    Ok(resp) => {
-                        println!("Response: {}", resp.content);
-                        assert!(!resp.content.is_empty());
-                    }
-                    Err(e) => {
-                        println!("Generation failed: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("Failed to create client: {}", e);
-            }
-        }
     }
 }

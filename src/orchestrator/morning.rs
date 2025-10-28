@@ -681,4 +681,23 @@ impl MorningOrchestrator {
 
         Ok(())
     }
+
+    /// Run analysis for a historical date (used in backtesting)
+    /// This ensures temporal isolation - only data UP TO the date is used
+    pub async fn analyze_at_date(
+        &self,
+        symbol: &str,
+        historical_date: chrono::NaiveDate,
+    ) -> Result<TradingDecision> {
+        info!(
+            "🌅 Starting historical analysis for {} on {}",
+            symbol, historical_date
+        );
+
+        // For backtest mode, we run the same analysis but with temporal isolation
+        // The market_client and sentiment_client should respect the backtest_date from config
+
+        // Run the regular analyze method - the clients will respect backtest_date from config
+        self.analyze(symbol).await
+    }
 }

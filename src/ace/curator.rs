@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use tracing::info;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::{
@@ -31,6 +31,10 @@ pub struct CuratorConfig {
     pub auto_update_usage: bool,
     /// Maximum deltas to apply in a single batch
     pub max_deltas_per_batch: usize,
+    /// Enable proactive pruning after reflections (ACE Refinement Phase)
+    pub enable_proactive_pruning: bool,
+    /// Minimum playbook size before pruning is enabled
+    pub min_bullets_for_pruning: usize,
 }
 
 impl Default for CuratorConfig {
@@ -41,6 +45,8 @@ impl Default for CuratorConfig {
             staleness_threshold_days: 30,
             auto_update_usage: true,
             max_deltas_per_batch: 100,
+            enable_proactive_pruning: true,  // Enable ACE proactive refinement by default
+            min_bullets_for_pruning: 50,     // Start pruning after 50 bullets
         }
     }
 }
@@ -300,7 +306,31 @@ impl Curator {
             .await
             .context("Failed to apply reflection deltas")?;
 
-        // Get stats after changes
+        // ACE Refinement Phase: Proactive pruning of low-confidence/stale bullets
+        // This implements the "Grow-and-Refine" mechanism from the ACE framework
+        if self.config.enable_proactive_pruning {
+            let current_total = self.playbook_dao.get_stats().await?.total_bullets;
+
+            if current_total >= self.config.min_bullets_for_pruning {
+                info!(
+                    "Running ACE proactive refinement (playbook has {} bullets)",
+                    current_total
+                );
+
+                let pruned = self.prune_playbook().await?;
+
+                if pruned > 0 {
+                    info!(
+                        "ACE refinement: pruned {} low-confidence/stale bullets from playbook",
+                        pruned
+                    );
+                } else {
+                    debug!("ACE refinement: no bullets needed pruning");
+                }
+            }
+        }
+
+        // Get stats after changes (including any pruning)
         let stats_after = self.playbook_dao.get_stats().await?;
 
         Ok(self.build_summary(vec![apply_report], stats_before, stats_after))
@@ -357,6 +387,46 @@ impl Curator {
             summaries.len()
         );
         Ok(summaries)
+    }
+
+    /// Prune low-confidence and stale bullets (ACE Refinement Phase)
+    /// Should be called periodically to prevent unbounded growth
+    pub async fn prune_playbook(&self) -> Result<usize> {
+        info!("Starting ACE playbook refinement (pruning low-confidence/stale bullets)");
+
+        // Get all bullets that should be pruned
+        let candidates = self
+            .playbook_dao
+            .get_stale_bullets(self.config.staleness_threshold_days)
+            .await?;
+
+        let mut pruned_count = 0;
+
+        for bullet in candidates {
+            // Check if bullet should be pruned based on performance
+            if bullet.should_prune(
+                self.config.min_confidence_for_pruning,
+                self.config.staleness_threshold_days,
+            ) {
+                info!(
+                    "Pruning bullet {} (confidence: {:.3}, helpful: {}, harmful: {}): {}",
+                    bullet.id,
+                    bullet.confidence,
+                    bullet.helpful_count,
+                    bullet.harmful_count,
+                    bullet.content.chars().take(60).collect::<String>()
+                );
+
+                self.playbook_dao.delete_bullet(bullet.id).await?;
+                pruned_count += 1;
+            }
+        }
+
+        info!(
+            "ACE refinement complete: {} bullets pruned from playbook",
+            pruned_count
+        );
+        Ok(pruned_count)
     }
 
     /// Get playbook statistics and health metrics
@@ -508,6 +578,8 @@ mod tests {
         assert_eq!(config.staleness_threshold_days, 30);
         assert!(config.auto_update_usage);
         assert_eq!(config.max_deltas_per_batch, 100);
+        assert!(config.enable_proactive_pruning);
+        assert_eq!(config.min_bullets_for_pruning, 50);
     }
 
     #[test]

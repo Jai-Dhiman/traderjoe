@@ -123,6 +123,25 @@ pub enum Commands {
         strategy: String,
     },
 
+    /// Run full ACE pipeline backtest with real learning
+    BacktestAce {
+        /// Start date for backtest
+        #[arg(short, long)]
+        start_date: NaiveDate,
+
+        /// End date for backtest (defaults to 30 days from start)
+        #[arg(short, long)]
+        end_date: Option<NaiveDate>,
+
+        /// Symbol to backtest
+        #[arg(short = 'y', long, default_value = "SPY")]
+        symbol: String,
+
+        /// Skip sentiment analysis (faster, less accurate)
+        #[arg(long)]
+        skip_sentiment: bool,
+    },
+
     /// Display open positions and account status
     Positions,
 
@@ -201,6 +220,10 @@ pub async fn run(cli: Cli, pool: PgPool) -> Result<()> {
             info!("Running backtest from {} to {} with strategy {}",
                   start_date, end_date, strategy);
             commands::backtest(pool, start_date, end_date, strategy).await?;
+        }
+        Commands::BacktestAce { start_date, end_date, symbol, skip_sentiment } => {
+            info!("Running ACE backtest from {} for symbol {}", start_date, symbol);
+            commands::backtest_ace(pool, start_date, end_date, symbol, skip_sentiment).await?;
         }
         Commands::Positions => {
             info!("Displaying open positions");

@@ -142,8 +142,9 @@ impl MarketDataClient {
         }
     }
     
-    pub async fn fetch_ohlcv(&self, symbol: &str, days: u32) -> DataResult<Vec<OHLCV>> {
-        tracing::info!("Fetching OHLCV data for {} (last {} days)", symbol, days);
+    /// Fetch OHLCV data for a specific date range
+    pub async fn fetch_ohlcv_range(&self, symbol: &str, start_date: NaiveDate, end_date: NaiveDate) -> DataResult<Vec<OHLCV>> {
+        tracing::info!("Fetching OHLCV data for {} from {} to {}", symbol, start_date, end_date);
 
         // Check if Polygon API key is configured
         let api_key = self.polygon_api_key.as_ref().ok_or_else(|| {
@@ -151,10 +152,6 @@ impl MarketDataClient {
                 "POLYGON_API_KEY environment variable must be set. Get your free API key from https://polygon.io".to_string()
             )
         })?;
-
-        // Calculate date range
-        let end_date = Utc::now().date_naive();
-        let start_date = end_date - chrono::Duration::days(days as i64);
 
         // Wait for rate limiter (respects 5 calls/min limit)
         {
@@ -275,7 +272,14 @@ impl MarketDataClient {
 
         Ok(data)
     }
-    
+
+    /// Fetch OHLCV data for the last N days (convenience wrapper)
+    pub async fn fetch_ohlcv(&self, symbol: &str, days: u32) -> DataResult<Vec<OHLCV>> {
+        let end_date = Utc::now().date_naive();
+        let start_date = end_date - chrono::Duration::days(days as i64);
+        self.fetch_ohlcv_range(symbol, start_date, end_date).await
+    }
+
     pub async fn persist_ohlcv(&self, data: &[OHLCV]) -> DataResult<usize> {
         let mut count = 0;
         
@@ -313,33 +317,47 @@ impl MarketDataClient {
         Ok(count)
     }
 
-    /// Fetch latest market data as JSON (for evening review)
-    pub async fn fetch_latest(&self, symbol: &str) -> DataResult<serde_json::Value> {
+    /// Fetch market data for a specific date (for backtest mode)
+    /// Fetches a 7-day window around the target date to avoid Polygon.io free tier limitations
+    pub async fn fetch_for_date(&self, symbol: &str, target_date: NaiveDate) -> DataResult<serde_json::Value> {
         use serde_json::json;
 
-        // Fetch the most recent day's data
-        let data = self.fetch_ohlcv(symbol, 1).await?;
+        // Fetch 7-day window: 3 days before and 3 days after target date
+        // This avoids Polygon.io free tier single-day limitation
+        let start_date = target_date - chrono::Duration::days(3);
+        let end_date = target_date + chrono::Duration::days(3);
 
-        if data.is_empty() {
-            return Err(DataError::NoData {
+        tracing::info!("Fetching data for {} on {} (window: {} to {})",
+                      symbol, target_date, start_date, end_date);
+
+        let data = self.fetch_ohlcv_range(symbol, start_date, end_date).await?;
+
+        // Find the specific date we need
+        let target_data = data.iter()
+            .find(|d| d.date == target_date)
+            .ok_or_else(|| DataError::NoData {
                 symbol: symbol.to_string(),
-                start: "today".to_string(),
-                end: "today".to_string(),
-            });
-        }
-
-        let latest = &data[data.len() - 1];
+                start: target_date.to_string(),
+                end: target_date.to_string(),
+            })?;
 
         Ok(json!({
-            "symbol": latest.symbol,
-            "date": latest.date.to_string(),
-            "open": latest.open,
-            "high": latest.high,
-            "low": latest.low,
-            "close": latest.close,
-            "volume": latest.volume,
-            "source": latest.source,
+            "symbol": target_data.symbol,
+            "date": target_data.date.to_string(),
+            "open": target_data.open,
+            "high": target_data.high,
+            "low": target_data.low,
+            "close": target_data.close,
+            "volume": target_data.volume,
+            "source": target_data.source,
         }))
+    }
+
+    /// Fetch latest market data as JSON (for evening review)
+    pub async fn fetch_latest(&self, symbol: &str) -> DataResult<serde_json::Value> {
+        // Use today's date
+        let today = Utc::now().date_naive();
+        self.fetch_for_date(symbol, today).await
     }
 
     /// Fetch current VIX value (volatility index)

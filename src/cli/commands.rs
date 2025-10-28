@@ -1455,3 +1455,58 @@ async fn validate_required_services(pool: &PgPool) -> Result<()> {
 
     Ok(())
 }
+
+/// Run ACE backtest simulation on historical data
+pub async fn backtest_ace(
+    pool: PgPool,
+    start_date: NaiveDate,
+    end_date: Option<NaiveDate>,
+    symbol: String,
+    skip_sentiment: bool,
+) -> Result<()> {
+    use crate::orchestrator::BacktestOrchestrator;
+
+    info!(
+        "🚀 Starting ACE backtest from {} for {}",
+        start_date, symbol
+    );
+
+    // Default to 30 days if end_date not provided
+    let end_date = end_date.unwrap_or_else(|| start_date + chrono::Duration::days(30));
+
+    // Validate date range
+    if end_date < start_date {
+        return Err(anyhow::anyhow!(
+            "End date {} must be after start date {}",
+            end_date,
+            start_date
+        ));
+    }
+
+    if end_date > chrono::Utc::now().naive_utc().date() {
+        return Err(anyhow::anyhow!(
+            "End date {} cannot be in the future (today is {})",
+            end_date,
+            chrono::Utc::now().naive_utc().date()
+        ));
+    }
+
+    // Load configuration
+    let config = crate::config::Config::load()?;
+
+    // Create backtest orchestrator
+    let orchestrator =
+        BacktestOrchestrator::new(pool, config, start_date, end_date, skip_sentiment);
+
+    // Run the backtest
+    let results = orchestrator.run(&symbol).await?;
+
+    // Results are displayed by the orchestrator
+    println!("\n✅ Backtest completed successfully!");
+    println!(
+        "   {} trading days simulated ({} trades executed)",
+        results.trading_days, results.total_trades
+    );
+
+    Ok(())
+}
