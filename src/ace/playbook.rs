@@ -132,35 +132,66 @@ impl PlaybookDAO {
     }
 
     /// Insert new playbook bullet
+    ///
+    /// # Arguments
+    /// * `section` - The playbook section this bullet belongs to
+    /// * `content` - The bullet content
+    /// * `source_context_id` - Optional context ID that generated this bullet
+    /// * `meta` - Optional metadata
+    /// * `created_at` - Optional creation timestamp (for backtest mode). If None, uses NOW()
     pub async fn insert_bullet(
         &self,
         section: PlaybookSection,
         content: String,
         source_context_id: Option<Uuid>,
         meta: Option<serde_json::Value>,
+        created_at: Option<DateTime<Utc>>,
     ) -> Result<Uuid> {
         let bullet_id = Uuid::new_v4();
         let section_str = section.as_str();
 
-        sqlx::query!(
-            r#"
-            INSERT INTO playbook_bullets 
-            (id, section, content, source_context_id, meta)
-            VALUES ($1, $2, $3, $4, $5)
-            "#,
-            bullet_id,
-            section_str,
-            content,
-            source_context_id,
-            meta
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to insert playbook bullet")?;
+        if let Some(timestamp) = created_at {
+            // Use provided timestamp (for backtest mode)
+            sqlx::query!(
+                r#"
+                INSERT INTO playbook_bullets
+                (id, section, content, source_context_id, meta, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $6)
+                "#,
+                bullet_id,
+                section_str,
+                content,
+                source_context_id,
+                meta,
+                timestamp
+            )
+            .execute(&self.pool)
+            .await
+            .context("Failed to insert playbook bullet with timestamp")?;
+        } else {
+            // Use default NOW() for live mode
+            sqlx::query!(
+                r#"
+                INSERT INTO playbook_bullets
+                (id, section, content, source_context_id, meta)
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+                bullet_id,
+                section_str,
+                content,
+                source_context_id,
+                meta
+            )
+            .execute(&self.pool)
+            .await
+            .context("Failed to insert playbook bullet")?;
+        }
 
         info!(
-            "Inserted playbook bullet {} in section {}",
-            bullet_id, section_str
+            "Inserted playbook bullet {} in section {} (created_at: {})",
+            bullet_id,
+            section_str,
+            created_at.map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "NOW()".to_string())
         );
         Ok(bullet_id)
     }
@@ -462,9 +493,10 @@ impl PlaybookDAO {
     }
 
     /// Get recently used bullets for context generation
-    pub async fn get_recent_bullets(&self, days: i64, limit: usize) -> Result<Vec<PlaybookBullet>> {
+    /// Uses reference_date to determine "recent" (for backtest support)
+    pub async fn get_recent_bullets(&self, days: i64, limit: usize, reference_date: DateTime<Utc>) -> Result<Vec<PlaybookBullet>> {
         let limit = limit as i64;
-        let since = Utc::now() - chrono::Duration::days(days);
+        let since = reference_date - chrono::Duration::days(days);
 
         let rows = sqlx::query!(
             r#"
@@ -756,6 +788,7 @@ mod tests {
                 "When VIX > 30, calls have 65% win rate".to_string(),
                 None,
                 Some(json!({"test": true})),
+                None, // Use NOW() for test
             )
             .await
             .expect("Failed to insert bullet");

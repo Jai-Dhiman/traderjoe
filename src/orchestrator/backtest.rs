@@ -352,9 +352,9 @@ impl BacktestOrchestrator {
     async fn execute_backtest_trade(
         &self,
         context_id: Uuid,
-        _trade_date: NaiveDate,
+        trade_date: NaiveDate,
     ) -> Result<Uuid> {
-        use crate::trading::{PaperTradingEngine, PositionSizer, TradeType};
+        use crate::trading::{PaperTradingEngine, PositionSizer, SlippageCalculator, TradeType};
 
         // Load context
         let context_dao = ContextDAO::new(self.pool.clone());
@@ -389,6 +389,23 @@ impl BacktestOrchestrator {
             .and_then(|p| p.as_f64())
             .context("Could not get current price from market state")?;
 
+        // Extract VIX from market state for slippage calculation
+        let vix = context
+            .market_state
+            .get("market_data")
+            .and_then(|d| d.get("vix"))
+            .and_then(|v| v.as_f64());
+
+        // Calculate realistic slippage based on market conditions
+        let slippage_calc = SlippageCalculator::with_defaults();
+        let slippage_pct = slippage_calc.calculate_slippage(vix, true);
+
+        info!(
+            "Calculated slippage: {:.3}% (VIX: {})",
+            slippage_pct * 100.0,
+            vix.map(|v| format!("{:.1}", v)).unwrap_or_else(|| "N/A".to_string())
+        );
+
         // Determine trade type
         let trade_type = match action {
             "BUY_CALLS" => TradeType::Call,
@@ -403,23 +420,48 @@ impl BacktestOrchestrator {
         // Calculate shares (contracts)
         let shares = (position_size / (current_price * 100.0)).floor().max(1.0);
 
-        // Execute paper trade
+        // Convert trade_date to DateTime for entry timestamp
+        let entry_time = trade_date
+            .and_hms_opt(9, 30, 0)
+            .expect("Invalid time")
+            .and_utc();
+
+        info!(
+            "Entering backtest trade at historical time: {} (not {})",
+            entry_time.format("%Y-%m-%d %H:%M"),
+            chrono::Utc::now().format("%Y-%m-%d %H:%M")
+        );
+
+        // Execute paper trade with historical entry time
         let paper_trading = PaperTradingEngine::new(self.pool.clone());
         let trade = paper_trading
-            .enter_trade(
+            .enter_trade_with_time(
                 Some(context_id),
                 "SPY".to_string(),
-                trade_type,
+                trade_type.clone(),
                 current_price,
                 shares,
                 position_size,
                 None,   // strike_price
                 None,   // expiration_date
-                0.03,   // slippage_pct
+                slippage_pct,   // Use calculated realistic slippage
                 0.65,   // commission
                 None,   // notes
+                Some(slippage_pct),   // estimated_slippage_pct (same as actual for now)
+                vix,    // market_vix for tracking
+                None,   // option_moneyness
+                Some(entry_time), // Use historical date for entry
             )
             .await?;
+
+        info!(
+            "Trade {} entered: {} {} @ ${:.2} with {:.3}% slippage",
+            trade.id,
+            trade_type.to_string(),
+            "SPY",
+            current_price,
+            slippage_pct * 100.0
+        );
 
         Ok(trade.id)
     }

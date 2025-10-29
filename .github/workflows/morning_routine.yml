@@ -10,9 +10,9 @@ on:
 env:
   RUST_BACKTRACE: 1
   RUST_LOG: traderjoe=info,sqlx=warn
-  LLM_PROVIDER: cerebras
-  PRIMARY_MODEL: llama-3.3-70b
-  FALLBACK_MODEL: llama-3.1-8b
+  LLM_PROVIDER: workers_ai
+  PRIMARY_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+  FALLBACK_MODEL: "@cf/meta/llama-3.1-8b-instruct"
 
 jobs:
   morning_analysis:
@@ -108,7 +108,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
@@ -135,7 +136,7 @@ jobs:
           echo "LLM_PROVIDER: $LLM_PROVIDER"
           echo "PRIMARY_MODEL: $PRIMARY_MODEL"
           echo "FALLBACK_MODEL: $FALLBACK_MODEL"
-          echo "CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:0:10}..."
+          echo "CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:0:10}..."
           echo "========================="
 
           echo "Running morning analysis..."
@@ -157,7 +158,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PAPER_TRADING: true
         run: |

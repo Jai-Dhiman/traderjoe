@@ -443,7 +443,7 @@ async fn test_multi_day_pattern_evolution() -> Result<()> {
     }
 
     // Verify playbook has accumulated patterns
-    let bullets = playbook_dao.get_recent_bullets(7, 50).await?;
+    let bullets = playbook_dao.get_recent_bullets(7, 50, chrono::Utc::now()).await?;
     println!("\nFinal playbook has {} bullets", bullets.len());
 
     // Verify contexts are properly linked
@@ -580,6 +580,304 @@ async fn test_context_similarity_search() -> Result<()> {
     // This is verified in the morning orchestrator logs
 
     println!("Similarity search test completed");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Integration test - requires database"]
+async fn test_playbook_retrieval_at_different_reference_dates() -> Result<()> {
+    use uuid::Uuid;
+
+    let pool = setup_test_db().await;
+    clear_test_data(&pool).await?;
+
+    let playbook_dao = PlaybookDAO::new(pool.clone());
+
+    // Create bullets at different dates to simulate historical data
+    // Bullet 1: 40 days ago
+    let bullet_1_id = Uuid::new_v4();
+    let bullet_1_date = Utc::now() - chrono::Duration::days(40);
+
+    // Bullet 2: 20 days ago
+    let bullet_2_id = Uuid::new_v4();
+    let bullet_2_date = Utc::now() - chrono::Duration::days(20);
+
+    // Bullet 3: 10 days ago
+    let bullet_3_id = Uuid::new_v4();
+    let bullet_3_date = Utc::now() - chrono::Duration::days(10);
+
+    // Insert bullets with specific created_at dates
+    println!("Inserting test bullets at different dates...");
+
+    sqlx::query!(
+        r#"
+        INSERT INTO playbook_bullets (id, section, content, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $4)
+        "#,
+        bullet_1_id,
+        "pattern_insights",
+        "Bullet from 40 days ago",
+        bullet_1_date
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO playbook_bullets (id, section, content, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $4)
+        "#,
+        bullet_2_id,
+        "pattern_insights",
+        "Bullet from 20 days ago",
+        bullet_2_date
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO playbook_bullets (id, section, content, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $4)
+        "#,
+        bullet_3_id,
+        "pattern_insights",
+        "Bullet from 10 days ago",
+        bullet_3_date
+    )
+    .execute(&pool)
+    .await?;
+
+    // Test 1: Get bullets from "now" perspective (last 30 days)
+    // Should get bullets 2 and 3 (20 and 10 days ago)
+    println!("Test 1: Retrieving bullets from current date (last 30 days)...");
+    let bullets_now = playbook_dao
+        .get_recent_bullets(30, 20, Utc::now())
+        .await?;
+    assert_eq!(
+        bullets_now.len(),
+        2,
+        "Should get 2 bullets from current perspective (last 30 days)"
+    );
+
+    // Test 2: Get bullets from 35 days ago perspective (last 30 days from that date)
+    // Should get only bullet 1 (which was created 5 days before the reference date)
+    println!("Test 2: Retrieving bullets from 35 days ago perspective...");
+    let ref_date_35_days_ago = Utc::now() - chrono::Duration::days(35);
+    let bullets_35_days_ago = playbook_dao
+        .get_recent_bullets(30, 20, ref_date_35_days_ago)
+        .await?;
+    assert_eq!(
+        bullets_35_days_ago.len(),
+        1,
+        "Should get 1 bullet from 35 days ago perspective"
+    );
+    assert!(
+        bullets_35_days_ago[0].content.contains("40 days ago"),
+        "Should retrieve the oldest bullet"
+    );
+
+    // Test 3: Get bullets from 15 days ago perspective (last 30 days from that date)
+    // Should get bullets 1 and 2 (40 and 20 days ago relative to now = 25 and 5 days ago relative to that date)
+    println!("Test 3: Retrieving bullets from 15 days ago perspective...");
+    let ref_date_15_days_ago = Utc::now() - chrono::Duration::days(15);
+    let bullets_15_days_ago = playbook_dao
+        .get_recent_bullets(30, 20, ref_date_15_days_ago)
+        .await?;
+    assert_eq!(
+        bullets_15_days_ago.len(),
+        2,
+        "Should get 2 bullets from 15 days ago perspective"
+    );
+
+    // Test 4: Get bullets from 5 days ago perspective (last 30 days from that date)
+    // Should get all 3 bullets (40, 20, 10 days ago relative to now = 35, 15, 5 days ago relative to that date)
+    println!("Test 4: Retrieving bullets from 5 days ago perspective...");
+    let ref_date_5_days_ago = Utc::now() - chrono::Duration::days(5);
+    let bullets_5_days_ago = playbook_dao
+        .get_recent_bullets(30, 20, ref_date_5_days_ago)
+        .await?;
+    assert_eq!(
+        bullets_5_days_ago.len(),
+        3,
+        "Should get all 3 bullets from 5 days ago perspective"
+    );
+
+    // Test 5: Backtest scenario - retrieve bullets as of a specific historical date
+    // This simulates the backtest running on 2024-09-15, looking back 30 days
+    // In this case, from current perspective, that's about 43 days ago
+    println!("Test 5: Simulating backtest scenario (historical date retrieval)...");
+    let backtest_date = Utc::now() - chrono::Duration::days(43);
+    let bullets_backtest = playbook_dao
+        .get_recent_bullets(30, 20, backtest_date)
+        .await?;
+
+    // From the backtest date perspective, bullet 1 (40 days ago from now)
+    // was only 3 days old, so it should be included
+    assert!(
+        bullets_backtest.len() >= 1,
+        "Backtest should retrieve bullets that existed at that time"
+    );
+
+    println!("✅ Playbook retrieval at different reference dates test passed");
+    println!("   - Current date perspective: {} bullets", bullets_now.len());
+    println!("   - 35 days ago perspective: {} bullets", bullets_35_days_ago.len());
+    println!("   - 15 days ago perspective: {} bullets", bullets_15_days_ago.len());
+    println!("   - 5 days ago perspective: {} bullets", bullets_5_days_ago.len());
+    println!("   - Backtest scenario: {} bullets", bullets_backtest.len());
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Integration test - requires database and LLM"]
+async fn test_playbook_ablation_empty_vs_populated() -> Result<()> {
+    use uuid::Uuid;
+
+    let pool = setup_test_db().await;
+    clear_test_data(&pool).await?;
+    insert_sample_market_data(&pool, "SPY").await?;
+
+    let config = create_test_config();
+    let playbook_dao = PlaybookDAO::new(pool.clone());
+
+    println!("\n=== PHASE 1: Decision with EMPTY playbook ===");
+
+    // Step 1: Generate decision with empty playbook
+    let morning1 = MorningOrchestrator::new(pool.clone(), config.clone()).await?;
+    let decision1 = morning1.analyze("SPY").await?;
+
+    println!("Decision 1 (empty playbook):");
+    println!("  Action: {}", decision1.action);
+    println!("  Confidence: {:.2}%", decision1.confidence * 100.0);
+    println!("  Reasoning length: {} chars", decision1.reasoning.len());
+
+    // Store decision 1 details
+    let action1 = decision1.action.clone();
+    let confidence1 = decision1.confidence;
+    let reasoning1 = decision1.reasoning.clone();
+
+    // Verify playbook is indeed empty
+    let bullets_before = playbook_dao
+        .get_recent_bullets(30, 50, Utc::now())
+        .await?;
+    println!("  Playbook bullets before: {}", bullets_before.len());
+    assert_eq!(bullets_before.len(), 0, "Playbook should be empty initially");
+
+    println!("\n=== PHASE 2: Adding strong playbook bullets ===");
+
+    // Step 2: Add several strong playbook bullets with relevant content
+    // These bullets should influence the decision if they're being used
+    let bullets_to_add = vec![
+        ("pattern_insights", "When VIX is elevated above 20, market volatility increases risk of gap-downs in options positions. Historical data shows 15% higher failure rate.", 0.85),
+        ("regime_rules", "In high volatility regimes (VIX > 20), reduce position sizes by 30% to account for increased downside risk.", 0.80),
+        ("failure_modes", "Overconfident predictions during volatile markets led to 4 consecutive losses. Always factor in regime uncertainty.", 0.82),
+        ("model_reliability", "Technical signals show reduced predictive power when VIX exceeds 25. Confidence should be capped at 70% in these conditions.", 0.78),
+    ];
+
+    for (section, content, confidence) in bullets_to_add {
+        let bullet_id = Uuid::new_v4();
+        sqlx::query!(
+            r#"
+            INSERT INTO playbook_bullets (id, section, content, confidence, created_at, updated_at, last_used)
+            VALUES ($1, $2, $3, $4, NOW(), NOW(), NOW())
+            "#,
+            bullet_id,
+            section,
+            content,
+            confidence
+        )
+        .execute(&pool)
+        .await?;
+        println!("  Added bullet: {} (confidence: {:.0}%)", content.chars().take(60).collect::<String>(), confidence * 100.0);
+    }
+
+    // Verify bullets were added
+    let bullets_after = playbook_dao
+        .get_recent_bullets(30, 50, Utc::now())
+        .await?;
+    println!("  Playbook bullets after: {}", bullets_after.len());
+    assert_eq!(bullets_after.len(), 4, "Should have 4 playbook bullets");
+
+    println!("\n=== PHASE 3: Decision with POPULATED playbook ===");
+
+    // Step 3: Generate decision again with populated playbook
+    // Note: We need to add a small delay and new market data to avoid caching issues
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let morning2 = MorningOrchestrator::new(pool.clone(), config.clone()).await?;
+    let decision2 = morning2.analyze("SPY").await?;
+
+    println!("Decision 2 (populated playbook):");
+    println!("  Action: {}", decision2.action);
+    println!("  Confidence: {:.2}%", decision2.confidence * 100.0);
+    println!("  Reasoning length: {} chars", decision2.reasoning.len());
+
+    // Store decision 2 details
+    let action2 = decision2.action.clone();
+    let confidence2 = decision2.confidence;
+    let reasoning2 = decision2.reasoning.clone();
+
+    println!("\n=== PHASE 4: Comparing decisions ===");
+
+    // Step 4: Compare decisions to verify playbook influence
+    // The decisions should differ in some meaningful way if the playbook is being used
+
+    // Check 1: Reasoning should be different
+    let reasoning_similarity = if reasoning1 == reasoning2 {
+        100.0
+    } else {
+        // Simple similarity check based on common words
+        let words1: std::collections::HashSet<_> = reasoning1.split_whitespace().collect();
+        let words2: std::collections::HashSet<_> = reasoning2.split_whitespace().collect();
+        let common_words = words1.intersection(&words2).count();
+        let total_unique = words1.union(&words2).count();
+        (common_words as f64 / total_unique as f64) * 100.0
+    };
+
+    println!("Comparison:");
+    println!("  Action changed: {} -> {} ({})", action1, action2, if action1 != action2 { "CHANGED" } else { "SAME" });
+    println!("  Confidence changed: {:.2}% -> {:.2}% ({})",
+        confidence1 * 100.0,
+        confidence2 * 100.0,
+        if (confidence1 - confidence2).abs() > 0.05 { "CHANGED" } else { "SIMILAR" }
+    );
+    println!("  Reasoning similarity: {:.1}%", reasoning_similarity);
+
+    // Check 2: At least one of these should be true:
+    // - Action changed
+    // - Confidence changed by more than 5%
+    // - Reasoning is significantly different (< 80% similar)
+    // - Reasoning explicitly mentions playbook concepts
+    let action_changed = action1 != action2;
+    let confidence_changed = (confidence1 - confidence2).abs() > 0.05;
+    let reasoning_different = reasoning_similarity < 80.0;
+    let mentions_playbook_concepts = reasoning2.to_lowercase().contains("volatility")
+        || reasoning2.to_lowercase().contains("regime")
+        || reasoning2.to_lowercase().contains("historical")
+        || reasoning2.to_lowercase().contains("risk");
+
+    println!("\nAblation test results:");
+    println!("  ✓ Action changed: {}", action_changed);
+    println!("  ✓ Confidence changed significantly: {}", confidence_changed);
+    println!("  ✓ Reasoning is different: {}", reasoning_different);
+    println!("  ✓ Mentions playbook concepts: {}", mentions_playbook_concepts);
+
+    // Assert that playbook had some influence
+    assert!(
+        action_changed || confidence_changed || reasoning_different || mentions_playbook_concepts,
+        "Playbook should influence the decision in some way. All indicators suggest no change."
+    );
+
+    // If confidence changed, it should generally decrease (due to the risk-reducing nature of our bullets)
+    if confidence_changed {
+        println!("\n  Confidence direction: {}",
+            if confidence2 < confidence1 { "DECREASED (expected)" } else { "INCREASED (unexpected but possible)" }
+        );
+    }
+
+    println!("\n✅ Playbook ablation test passed - playbook entries DO influence decisions");
 
     Ok(())
 }

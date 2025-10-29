@@ -109,12 +109,20 @@ impl EveningOrchestrator {
         let playbook_dao = PlaybookDAO::new(pool.clone());
         let llm_client = LLMClient::from_config(&config).await?;
 
-        // Create curator with default config
+        // Determine the timestamp for bullet creation (backtest vs live)
+        let created_at = config.backtest_date.map(|date| {
+            date.and_hms_opt(0, 0, 0)
+                .expect("Invalid time")
+                .and_utc()
+        });
+
+        // Create curator with backtest timestamp if in backtest mode
         let curator = Curator::new(
             playbook_dao.clone(),
             llm_client,
             None, // Use default curator config
             None, // Use default delta engine config
+            created_at, // Use backtest date for bullet timestamps in backtest mode
         )
         .await?;
 
@@ -470,18 +478,28 @@ impl EveningOrchestrator {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing symbol in market state"))?;
 
-        // Fetch exit price - use backtest_date if in backtest mode
-        let current_data = if let Some(backtest_date) = self._config.backtest_date {
+        // Fetch exit price and calculate exit time for backtest mode
+        let (current_data, exit_time) = if let Some(backtest_date) = self._config.backtest_date {
             info!("Fetching exit price for backtest date: {}", backtest_date);
-            self.market_client
+            let data = self.market_client
                 .fetch_for_date(symbol, backtest_date)
                 .await
-                .context("Failed to fetch exit price for closing trade")?
+                .context("Failed to fetch exit price for closing trade")?;
+
+            // Use market close time (4:00 PM ET = 16:00) for backtest exit
+            let historical_exit_time = backtest_date
+                .and_hms_opt(16, 0, 0)
+                .expect("Invalid time")
+                .and_utc();
+
+            info!("Using historical exit time for backtest: {}", historical_exit_time.format("%Y-%m-%d %H:%M"));
+            (data, Some(historical_exit_time))
         } else {
-            self.market_client
+            let data = self.market_client
                 .fetch_latest(symbol)
                 .await
-                .context("Failed to fetch exit price for closing trade")?
+                .context("Failed to fetch exit price for closing trade")?;
+            (data, None)
         };
 
         let exit_price = current_data
@@ -493,10 +511,11 @@ impl EveningOrchestrator {
         for trade in context_trades {
             info!("Closing trade {} at exit price ${:.2}", trade.id, exit_price);
             let closed_trade = self._paper_trading
-                .exit_trade(
+                .exit_trade_with_time(
                     trade.id,
                     exit_price,
                     crate::trading::ExitReason::AutoExit,
+                    exit_time,
                 )
                 .await?;
 

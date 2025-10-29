@@ -215,11 +215,21 @@ pub struct DeltaEngine {
     playbook_dao: PlaybookDAO,
     embedder: EmbeddingGemma,
     config: DeltaEngineConfig,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl DeltaEngine {
     /// Create new delta engine
-    pub async fn new(playbook_dao: PlaybookDAO, config: Option<DeltaEngineConfig>) -> Result<Self> {
+    ///
+    /// # Arguments
+    /// * `playbook_dao` - DAO for accessing playbook bullets
+    /// * `config` - Optional configuration for delta engine
+    /// * `created_at` - Optional timestamp for backtest mode (when bullets should be created)
+    pub async fn new(
+        playbook_dao: PlaybookDAO,
+        config: Option<DeltaEngineConfig>,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Self> {
         let embedder = EmbeddingGemma::load().await?;
         let config = config.unwrap_or_default();
 
@@ -227,6 +237,7 @@ impl DeltaEngine {
             playbook_dao,
             embedder,
             config,
+            created_at,
         })
     }
 
@@ -348,6 +359,7 @@ impl DeltaEngine {
                     .and_then(|id| id.as_str())
                     .and_then(|id| Uuid::parse_str(id).ok()),
                 delta.meta.clone(),
+                self.created_at, // Use backtest timestamp if in backtest mode
             )
             .await
         {
@@ -736,7 +748,7 @@ mod tests {
             .expect("Failed to run migrations");
 
         let playbook_dao = PlaybookDAO::new(pool);
-        let engine = DeltaEngine::new(playbook_dao, None)
+        let engine = DeltaEngine::new(playbook_dao, None, None) // Use NOW() for test
             .await
             .expect("Failed to create delta engine");
 

@@ -10,9 +10,9 @@ on:
 env:
   RUST_BACKTRACE: 1
   RUST_LOG: traderjoe=info,sqlx=warn
-  LLM_PROVIDER: cerebras
-  PRIMARY_MODEL: llama-3.3-70b
-  FALLBACK_MODEL: llama-3.1-8b
+  LLM_PROVIDER: workers_ai
+  PRIMARY_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+  FALLBACK_MODEL: "@cf/meta/llama-3.1-8b-instruct"
 
 jobs:
   evening_review:
@@ -71,7 +71,6 @@ jobs:
       - name: Run Evening Review (ACE Reflection)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

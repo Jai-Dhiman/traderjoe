@@ -4,8 +4,10 @@
 pub mod backtest;
 pub mod evening;
 pub mod morning;
+pub mod performance;
 
 // Re-export main orchestrators
 pub use backtest::{BacktestOrchestrator, BacktestResults, DayResult};
 pub use evening::EveningOrchestrator;
 pub use morning::MorningOrchestrator;
+pub use performance::{PerformanceStats, PerformanceTracker};

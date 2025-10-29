@@ -72,6 +72,7 @@ impl ACEEngine {
             llm_client.clone(),
             None,
             None,
+            None, // Use NOW() for live mode
         )
         .await?;
 
@@ -121,7 +122,7 @@ impl ACEEngine {
         );
 
         // Step 4: Get relevant playbook bullets (get recent ones)
-        let playbook_bullets = self.playbook_dao.get_recent_bullets(30, 20).await?;
+        let playbook_bullets = self.playbook_dao.get_recent_bullets(30, 20, chrono::Utc::now()).await?;
 
         info!("Retrieved {} playbook bullets", playbook_bullets.len());
 

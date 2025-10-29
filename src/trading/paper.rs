@@ -131,8 +131,47 @@ impl PaperTradingEngine {
         market_vix: Option<f64>,
         option_moneyness: Option<String>,
     ) -> Result<PaperTrade> {
+        self.enter_trade_with_time(
+            context_id,
+            symbol,
+            trade_type,
+            entry_price,
+            shares,
+            position_size_usd,
+            strike_price,
+            expiration_date,
+            slippage_pct,
+            commission,
+            notes,
+            estimated_slippage_pct,
+            market_vix,
+            option_moneyness,
+            None, // entry_time - defaults to Utc::now()
+        )
+        .await
+    }
+
+    /// Enter a new paper trade with custom entry time (for backtests)
+    pub async fn enter_trade_with_time(
+        &self,
+        context_id: Option<Uuid>,
+        symbol: String,
+        trade_type: TradeType,
+        entry_price: f64,
+        shares: f64,
+        position_size_usd: f64,
+        strike_price: Option<f64>,
+        expiration_date: Option<NaiveDate>,
+        slippage_pct: f64,
+        commission: f64,
+        notes: Option<serde_json::Value>,
+        estimated_slippage_pct: Option<f64>,
+        market_vix: Option<f64>,
+        option_moneyness: Option<String>,
+        entry_time: Option<chrono::DateTime<Utc>>,
+    ) -> Result<PaperTrade> {
         let id = Uuid::new_v4();
-        let entry_time = Utc::now();
+        let entry_time = entry_time.unwrap_or_else(|| Utc::now());
         let status = TradeStatus::Open;
 
         // Apply slippage to entry price (slippage worsens the entry)
@@ -236,7 +275,18 @@ impl PaperTradingEngine {
         exit_price: f64,
         exit_reason: ExitReason,
     ) -> Result<PaperTrade> {
-        let exit_time = Utc::now();
+        self.exit_trade_with_time(trade_id, exit_price, exit_reason, None).await
+    }
+
+    /// Exit a trade with a custom exit time (for backtests)
+    pub async fn exit_trade_with_time(
+        &self,
+        trade_id: Uuid,
+        exit_price: f64,
+        exit_reason: ExitReason,
+        exit_time: Option<chrono::DateTime<Utc>>,
+    ) -> Result<PaperTrade> {
+        let exit_time = exit_time.unwrap_or_else(|| Utc::now());
 
         // First get the trade to calculate P&L
         let trade = self.get_trade(trade_id).await?;

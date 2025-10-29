@@ -165,16 +165,24 @@ pub struct Curator {
 
 impl Curator {
     /// Create new Curator with all required components
+    ///
+    /// # Arguments
+    /// * `playbook_dao` - DAO for accessing playbook bullets
+    /// * `llm_client` - Client for LLM interactions
+    /// * `config` - Optional curator configuration
+    /// * `delta_config` - Optional delta engine configuration
+    /// * `created_at` - Optional timestamp for backtest mode (when bullets should be created)
     pub async fn new(
         playbook_dao: PlaybookDAO,
         llm_client: LLMClient,
         config: Option<CuratorConfig>,
         delta_config: Option<DeltaEngineConfig>,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
 
-        // Create delta engine
-        let delta_engine = DeltaEngine::new(playbook_dao.clone(), delta_config).await?;
+        // Create delta engine with backtest timestamp
+        let delta_engine = DeltaEngine::new(playbook_dao.clone(), delta_config, created_at).await?;
 
         // Create generator and reflector
         let generator = Generator::new(llm_client.clone());
@@ -202,7 +210,7 @@ impl Curator {
         // Get existing playbook for context
         let existing_playbook = self
             .playbook_dao
-            .get_recent_bullets(7, self.config.max_context_bullets)
+            .get_recent_bullets(7, self.config.max_context_bullets, chrono::Utc::now())
             .await
             .context("Failed to get existing playbook for context")?;
 
@@ -256,7 +264,7 @@ impl Curator {
         // Identify which bullets were referenced in the decision
         let available_bullets = self
             .playbook_dao
-            .get_recent_bullets(30, 100)
+            .get_recent_bullets(30, 100, chrono::Utc::now())
             .await
             .context("Failed to get bullets for reference identification")?;
 

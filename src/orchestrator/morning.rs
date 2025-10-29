@@ -5,7 +5,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     ace::{
@@ -15,13 +15,14 @@ use crate::{
     data::{MarketDataClient, ResearchClient, SentimentClient},
     embeddings::EmbeddingGemma,
     llm::LLMClient,
+    orchestrator::PerformanceTracker,
     vector::VectorStore,
 };
 
 /// Morning analysis orchestrator
 pub struct MorningOrchestrator {
     pool: PgPool,
-    _config: Config,  // Kept for potential future use
+    config: Config,
     market_client: MarketDataClient,
     research_client: ResearchClient,
     sentiment_client: SentimentClient,
@@ -30,6 +31,7 @@ pub struct MorningOrchestrator {
     context_dao: ContextDAO,
     playbook_dao: PlaybookDAO,
     llm_client: LLMClient,
+    performance_tracker: PerformanceTracker,
 }
 
 impl MorningOrchestrator {
@@ -61,6 +63,7 @@ impl MorningOrchestrator {
         let context_dao = ContextDAO::new(pool.clone());
         let playbook_dao = PlaybookDAO::new(pool.clone());
         let llm_client = LLMClient::from_config(&config).await?;
+        let performance_tracker = PerformanceTracker::new(pool.clone());
 
         // Ensure HNSW index exists
         vector_store
@@ -71,7 +74,7 @@ impl MorningOrchestrator {
 
         Ok(Self {
             pool,
-            _config: config,
+            config,
             market_client,
             research_client,
             sentiment_client,
@@ -80,6 +83,7 @@ impl MorningOrchestrator {
             context_dao,
             playbook_dao,
             llm_client,
+            performance_tracker,
         })
     }
 
@@ -402,17 +406,31 @@ impl MorningOrchestrator {
 
     /// Get relevant playbook entries from the ACE playbook database
     async fn get_playbook_entries(&self, _market_state: &Value) -> Result<Vec<String>> {
-        // Query playbook bullets from the last 30 days with high confidence
-        let bullets = self.playbook_dao.get_recent_bullets(30, 20).await?;
+        // Determine reference date: use backtest_date if in backtest mode, otherwise current time
+        let reference_date = if let Some(backtest_date) = self.config.backtest_date {
+            backtest_date.and_hms_opt(0, 0, 0)
+                .expect("Invalid time")
+                .and_utc()
+        } else {
+            Utc::now()
+        };
 
-        // Filter for high confidence bullets and return their content
+        // Query playbook bullets from the last 30 days with high confidence
+        let bullets = self.playbook_dao.get_recent_bullets(30, 20, reference_date).await?;
+
+        // Filter for moderate+ confidence bullets and return their content
+        // 0.45 threshold allows new bullets (start at 0.5) to be included
         let entries: Vec<String> = bullets
             .iter()
-            .filter(|b| b.confidence > 0.6)
+            .filter(|b| b.confidence > 0.45)
             .map(|b| b.content.clone())
             .collect();
 
-        info!("Retrieved {} playbook entries for context", entries.len());
+        info!(
+            "Retrieved {} playbook entries for context (as of {})",
+            entries.len(),
+            reference_date.format("%Y-%m-%d")
+        );
         Ok(entries)
     }
 
@@ -432,8 +450,35 @@ impl MorningOrchestrator {
             &Utc::now().format("%Y-%m-%d").to_string(),
         );
 
+        // Log playbook integration details
+        let playbook_chars: usize = playbook_entries.iter().map(|e| e.len()).sum();
+        info!(
+            "Prompt contains {} playbook entries ({} total chars)",
+            playbook_entries.len(),
+            playbook_chars
+        );
+
+        // Log individual playbook entries for debugging
+        if playbook_entries.is_empty() {
+            warn!("⚠️ No playbook entries included in decision prompt - system may not be learning!");
+        } else {
+            info!("Playbook entries in prompt:");
+            for (i, entry) in playbook_entries.iter().enumerate() {
+                info!("  {}. {}", i + 1, entry);
+            }
+        }
+
+        // Debug: log full prompt to verify playbook integration
+        debug!("Full LLM prompt:\n{}", prompt);
+        debug!(
+            "Prompt stats: total length={} chars, playbook section={} chars ({:.1}%)",
+            prompt.len(),
+            playbook_chars,
+            (playbook_chars as f64 / prompt.len() as f64) * 100.0
+        );
+
         // Get structured decision from LLM - no fallback
-        let decision = self
+        let mut decision = self
             .llm_client
             .generate_json::<TradingDecision>(&prompt, None)
             .await
@@ -442,11 +487,64 @@ impl MorningOrchestrator {
                 anyhow::anyhow!("Failed to generate trading decision from LLM: {}. Ensure Ollama is running with 'ollama serve' and model is available.", e)
             })?;
 
+        let raw_confidence = decision.confidence;
         info!(
-            "LLM generated decision: {} with {:.1}% confidence",
+            "LLM generated decision: {} with {:.1}% raw confidence",
             decision.action,
-            decision.confidence * 100.0
+            raw_confidence * 100.0
         );
+
+        // Apply confidence calibration based on recent performance
+        let (calibrated_confidence, perf_stats, calibration_summary) = self
+            .performance_tracker
+            .get_calibrated_confidence(raw_confidence, 10)
+            .await?;
+
+        // Update decision with calibrated confidence
+        decision.confidence = calibrated_confidence;
+
+        // Log calibration if significant adjustment occurred
+        if (calibrated_confidence - raw_confidence).abs() > 0.05 {
+            warn!(
+                "📊 Confidence adjusted: {:.1}% → {:.1}% | Reason: {}",
+                raw_confidence * 100.0,
+                calibrated_confidence * 100.0,
+                calibration_summary
+            );
+            warn!(
+                "📊 Recent performance: {}/{} wins ({:.1}% win rate), {}L/{}W streak",
+                perf_stats.wins,
+                perf_stats.total_trades,
+                perf_stats.win_rate * 100.0,
+                perf_stats.consecutive_losses,
+                perf_stats.consecutive_wins
+            );
+        } else {
+            info!(
+                "✓ Confidence calibrated: {:.1}% → {:.1}% (minor adjustment)",
+                raw_confidence * 100.0,
+                calibrated_confidence * 100.0
+            );
+        }
+
+        // Check if decision reasoning references playbook entries
+        if !playbook_entries.is_empty() {
+            let reasoning_lower = decision.reasoning.to_lowercase();
+            let playbook_referenced = playbook_entries.iter().any(|entry| {
+                // Check if any significant words from the playbook entry appear in reasoning
+                let entry_words: Vec<&str> = entry.split_whitespace()
+                    .filter(|w| w.len() > 5) // Only check substantial words
+                    .collect();
+                entry_words.iter().any(|word| reasoning_lower.contains(&word.to_lowercase()))
+            });
+
+            if playbook_referenced {
+                info!("✓ Decision reasoning appears to reference playbook knowledge");
+            } else {
+                warn!("⚠️ Decision reasoning does NOT appear to reference playbook entries - LLM may be ignoring playbook");
+                debug!("Decision reasoning: {}", decision.reasoning);
+            }
+        }
 
         // Validate the decision
         let decision_json = serde_json::to_value(&decision)?;
