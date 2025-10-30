@@ -60,6 +60,7 @@ config = "0.13"
 
 # Statistics & Math
 rand = "0.8"
+libm = "0.2"  # Mathematical functions for Black-Scholes
 
 # Utilities
 futures = "0.3"

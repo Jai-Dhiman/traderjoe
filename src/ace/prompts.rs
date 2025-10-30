@@ -93,14 +93,27 @@ RELEVANT PLAYBOOK ENTRIES:
 TASK:
 Analyze the current market situation and provide a trading recommendation for SPY options (0-1 DTE).
 
-Your response must be valid JSON matching this exact format:
+CRITICAL: Your response MUST be ONLY valid JSON with NO additional text, explanations, or markdown formatting.
+
+Required JSON Schema:
 {{
-    "action": "BUY_CALLS" | "BUY_PUTS" | "STAY_FLAT",
-    "confidence": 0.75,
-    "reasoning": "Clear explanation of your decision based on the evidence above",
-    "key_factors": ["Factor 1", "Factor 2", "Factor 3"],
-    "risk_factors": ["Risk 1", "Risk 2"],
-    "similar_pattern_reference": "Reference to most relevant past pattern or null",
+    "action": string,              // MUST be one of: "BUY_CALLS", "BUY_PUTS", or "STAY_FLAT"
+    "confidence": number,          // MUST be between 0.0 and 1.0 (e.g., 0.75 for 75%)
+    "reasoning": string,           // Clear explanation of your decision
+    "key_factors": array,          // Array of strings, at least 2 factors
+    "risk_factors": array,         // Array of strings describing risks
+    "similar_pattern_reference": string | null,  // Reference to past pattern or null
+    "position_size_multiplier": number  // MUST be between 0.0 and 1.0
+}}
+
+Example valid response:
+{{
+    "action": "BUY_CALLS",
+    "confidence": 0.65,
+    "reasoning": "Strong bullish momentum with RSI support. Initial 75% confidence reduced by bearish sentiment (-10%) to final 65%.",
+    "key_factors": ["RSI oversold bounce", "Volume surge", "Support at 200MA"],
+    "risk_factors": ["Bearish sentiment", "High VIX"],
+    "similar_pattern_reference": "2024-08-15: Similar setup resulted in +8% gain",
     "position_size_multiplier": 0.8
 }}
 
@@ -108,15 +121,36 @@ REASONING PROCESS:
 1. Analyze what the technical indicators suggest about momentum and trend
 2. Compare to similar past situations - what worked before?
 3. Consider current market regime and sentiment
-4. Identify key risk factors that could invalidate the thesis
-5. Determine confidence based on pattern strength and indicator alignment
+4. Identify ALL risk factors that could invalidate the thesis
+5. Calculate confidence penalties for EACH risk factor
+6. Determine final confidence after applying all risk penalties
 
-RULES:
-- Only trade if confidence > 0.6
+CRITICAL RISK ASSESSMENT RULES:
+- You MUST address EVERY risk factor identified in your reasoning
+- DO NOT dismiss risk factors with phrases like "but not concerning" or "not worrisome"
+- EACH significant risk factor should appropriately reduce confidence:
+  * Bearish sentiment when going long: Consider -5 to -15% depending on strength
+  * High volatility (VIX > 25): Consider -5 to -15% depending on strategy fit
+  * Conflicting technical signals: Consider -5% per major conflict
+  * Market conditions: Assess organically based on the specific situation
+- If 2+ major risk factors exist, confidence should typically be < 70%
+- If 3+ major risk factors exist, strongly consider STAY_FLAT
+
+EXAMPLE OF CORRECT REASONING:
+"Initial confidence: 85%. However, bearish sentiment (-10%) and high volatility (-10%) reduce confidence to 65%. Given these risks, position size reduced."
+
+EXAMPLE OF INCORRECT REASONING (DO NOT DO THIS):
+"Sentiment is bearish but not concerning due to technical alignment" ❌
+"High volatility but we proceed anyway" ❌
+"Risk factors noted but don't affect the decision" ❌
+
+TRADING RULES:
+- Only trade if confidence > 0.6 AFTER risk penalties applied
 - Reduce position size if confidence < 0.75
 - Never risk more than intended with position_size_multiplier
 - Be explicit about why this setup is attractive or unattractive
 - Reference specific playbook entries when applicable
+- Show your confidence calculation: Initial → After Risk Penalties → Final
 
 CRITICAL: Do NOT mention "fallback", "limited data", or "research availability" in your response.
 Base decisions ONLY on the technical indicators, price movement, and sentiment shown above.

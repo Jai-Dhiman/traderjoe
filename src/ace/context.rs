@@ -36,6 +36,7 @@ impl ContextDAO {
     }
 
     /// Insert new ACE context with embedding
+    /// If timestamp is not provided, uses the current time.
     pub async fn insert_context(
         &self,
         market_state: &serde_json::Value,
@@ -44,9 +45,11 @@ impl ContextDAO {
         confidence: f32,
         outcome: Option<&serde_json::Value>,
         embedding: Vec<f32>,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Uuid> {
         let pg_vector = PgVector::new(embedding);
         let context_id = Uuid::new_v4();
+        let timestamp = timestamp.unwrap_or_else(|| Utc::now());
 
         sqlx::query!(
             r#"
@@ -55,7 +58,7 @@ impl ContextDAO {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
             context_id,
-            Utc::now(),
+            timestamp,
             market_state,
             decision,
             reasoning,

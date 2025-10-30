@@ -27,47 +27,14 @@ pub struct LLMResponse {
     pub total_tokens: Option<usize>,
 }
 
-/// Ollama API request payload
-#[derive(Debug, Serialize)]
-struct OllamaGenerateRequest {
-    model: String,
-    prompt: String,
-    stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    options: Option<OllamaOptions>,
-}
-
-/// Ollama API options
-#[derive(Debug, Serialize)]
-struct OllamaOptions {
-    temperature: Option<f32>,
-    num_predict: Option<i32>,
-}
-
-/// Ollama API response
-#[derive(Debug, Deserialize)]
-struct OllamaGenerateResponse {
-    model: String,
-    response: String,
-    done: bool,
-    #[serde(default)]
-    prompt_eval_count: Option<i32>,
-    #[serde(default)]
-    eval_count: Option<i32>,
-    #[serde(default)]
-    total_duration: Option<i64>,
-}
 
 /// LLM client configuration
 #[derive(Debug, Clone)]
 pub struct LLMConfig {
-    pub provider: String, // "workers_ai" or "ollama"
+    pub provider: String, // "workers_ai" or "openai"
     pub workers_ai_url: String,
     pub workers_ai_account_id: Option<String>,
     pub workers_ai_api_token: Option<String>,
-    pub ollama_url: String,
     pub primary_model: String,
     pub fallback_model: String,
     pub timeout_seconds: u64,
@@ -78,13 +45,12 @@ pub struct LLMConfig {
 impl Default for LLMConfig {
     fn default() -> Self {
         Self {
-            provider: "workers_ai".to_string(),
+            provider: "openai".to_string(),
             workers_ai_url: "https://api.cloudflare.com/client/v4/accounts".to_string(),
             workers_ai_account_id: None,
             workers_ai_api_token: None,
-            ollama_url: "http://localhost:11434".to_string(),
-            primary_model: "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
-            fallback_model: "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
+            primary_model: "gpt-5-nano-2025-08-07".to_string(),
+            fallback_model: "gpt-5-nano-2025-08-07".to_string(),
             timeout_seconds: 30,
             max_retries: 3,
             force_retries: false,
@@ -96,7 +62,7 @@ impl Default for LLMConfig {
 #[derive(Clone)]
 enum ProviderClient {
     WorkersAI(OpenAIClient<OpenAIConfig>),
-    Ollama { base_url: String, http_client: reqwest::Client },
+    OpenAI(OpenAIClient<OpenAIConfig>),
 }
 
 /// LLM client supporting multiple providers
@@ -141,22 +107,22 @@ impl LLMClient {
                 let client = OpenAIClient::with_config(openai_config);
                 ProviderClient::WorkersAI(client)
             }
-            "ollama" => {
-                info!("Initializing Ollama provider (native API)");
+            "openai" => {
+                info!("Initializing OpenAI provider");
 
-                let http_client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(config.timeout_seconds))
-                    .build()
-                    .context("Failed to create HTTP client for Ollama")?;
+                let api_key = api_key
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("OPENAI_API_KEY is required for OpenAI provider"))?;
 
-                ProviderClient::Ollama {
-                    base_url: config.ollama_url.clone(),
-                    http_client,
-                }
+                let openai_config = OpenAIConfig::new()
+                    .with_api_key(&api_key);
+
+                let client = OpenAIClient::with_config(openai_config);
+                ProviderClient::OpenAI(client)
             }
             _ => {
                 return Err(anyhow::anyhow!(
-                    "Unsupported LLM provider: {}. Use 'workers_ai' or 'ollama'",
+                    "Unsupported LLM provider: {}. Use 'workers_ai' or 'openai'",
                     config.provider
                 ));
             }
@@ -176,7 +142,6 @@ impl LLMClient {
             workers_ai_url: config.llm.workers_ai_url.clone(),
             workers_ai_account_id: config.apis.cloudflare_account_id.clone(),
             workers_ai_api_token: config.apis.cloudflare_api_token.clone(),
-            ollama_url: config.llm.ollama_url.clone(),
             primary_model: config.llm.primary_model.clone(),
             fallback_model: config.llm.fallback_model.clone(),
             timeout_seconds: config.llm.timeout_seconds,
@@ -187,7 +152,7 @@ impl LLMClient {
         // Get API key based on provider
         let api_key = match llm_config.provider.as_str() {
             "workers_ai" => config.apis.cloudflare_api_token.clone(),
-            "ollama" => None, // Ollama doesn't need API key
+            "openai" => config.apis.openai_api_key.clone(),
             _ => None,
         };
 
@@ -200,7 +165,7 @@ impl LLMClient {
     }
 
     /// Internal generate method with JSON mode support
-    async fn generate_internal(&self, prompt: &str, model: Option<&str>, json_mode: bool) -> Result<LLMResponse> {
+    async fn generate_internal(&self, prompt: &str, model: Option<&str>, _json_mode: bool) -> Result<LLMResponse> {
         let model_name = model.unwrap_or(&self.config.primary_model);
 
         info!(
@@ -216,8 +181,8 @@ impl LLMClient {
                 ProviderClient::WorkersAI(client) => {
                     self.generate_with_workers_ai(client, prompt, model_name).await
                 }
-                ProviderClient::Ollama { base_url, http_client } => {
-                    self.generate_with_ollama(http_client, base_url, prompt, model_name, json_mode).await
+                ProviderClient::OpenAI(client) => {
+                    self.generate_with_openai(client, prompt, model_name).await
                 }
             };
 
@@ -311,75 +276,153 @@ impl LLMClient {
         }
     }
 
-    /// Generate using native Ollama API
-    async fn generate_with_ollama(
+    /// Generate using OpenAI API
+    async fn generate_with_openai(
         &self,
-        http_client: &reqwest::Client,
-        base_url: &str,
+        client: &OpenAIClient<OpenAIConfig>,
         prompt: &str,
         model_name: &str,
-        json_mode: bool,
     ) -> Result<LLMResponse> {
-        let request_payload = OllamaGenerateRequest {
-            model: model_name.to_string(),
-            prompt: prompt.to_string(),
-            stream: false,
-            format: if json_mode { Some("json".to_string()) } else { None },
-            options: None,
-        };
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(prompt)
+                .build()
+                .context("Failed to build user message")?,
+        )];
 
-        let url = format!("{}/api/generate", base_url);
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(model_name)
+            .messages(messages)
+            .build()
+            .context("Failed to build chat completion request")?;
 
-        let response = http_client
-            .post(&url)
-            .json(&request_payload)
-            .send()
-            .await
-            .context("Failed to send request to Ollama")?;
+        match timeout(
+            Duration::from_secs(self.config.timeout_seconds),
+            client.chat().create(request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => {
+                let content = response
+                    .choices
+                    .first()
+                    .and_then(|c| c.message.content.clone())
+                    .ok_or_else(|| anyhow::anyhow!("No content in API response"))?;
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Ollama API error: {} - {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ));
+                Ok(LLMResponse {
+                    content,
+                    model: response.model.clone(),
+                    prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens as usize),
+                    completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens as usize),
+                    total_tokens: response.usage.as_ref().map(|u| u.total_tokens as usize),
+                })
+            }
+            Ok(Err(e)) => Err(anyhow::anyhow!("OpenAI API error: {}", e)),
+            Err(_) => Err(anyhow::anyhow!(
+                "Request timeout after {} seconds",
+                self.config.timeout_seconds
+            )),
         }
-
-        let ollama_response: OllamaGenerateResponse = response
-            .json()
-            .await
-            .context("Failed to parse Ollama response")?;
-
-        Ok(LLMResponse {
-            content: ollama_response.response,
-            model: ollama_response.model,
-            prompt_tokens: ollama_response.prompt_eval_count.map(|c| c as usize),
-            completion_tokens: ollama_response.eval_count.map(|c| c as usize),
-            total_tokens: ollama_response.prompt_eval_count
-                .and_then(|p| ollama_response.eval_count.map(|e| (p + e) as usize)),
-        })
     }
+
 
     /// Generate text with structured JSON output
     pub async fn generate_json<T>(&self, prompt: &str, model: Option<&str>) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
     {
-        let enhanced_prompt = format!(
-            "{}
+        let mut last_error = None;
+
+        // Retry JSON parsing up to 3 times with progressively clearer instructions
+        for attempt in 1..=3 {
+            let enhanced_prompt = if attempt == 1 {
+                format!(
+                    "{}
 
 Please respond with valid JSON only. Do not include any explanation or markdown formatting.",
-            prompt
-        );
+                    prompt
+                )
+            } else {
+                // On retry, be even more explicit
+                format!(
+                    "{}
 
-        // Use JSON mode for Ollama to force JSON output
-        let response = self.generate_internal(&enhanced_prompt, model, true).await?;
+CRITICAL: The previous response failed to parse as valid JSON.
+Respond with ONLY valid JSON matching the schema provided above.
+Do NOT include:
+- Markdown code blocks (```json or ```)
+- Any explanatory text before or after the JSON
+- Comments in the JSON
+- Trailing commas
+Just return the raw JSON object starting with {{ and ending with }}.",
+                    prompt
+                )
+            };
 
-        // Try to extract JSON from response
-        let json_content = extract_json_from_text(&response.content)
-            .ok_or_else(|| anyhow::anyhow!("No valid JSON found in response"))?;
+            info!("Generating JSON response (attempt {}/3)", attempt);
 
-        serde_json::from_str(&json_content).context("Failed to parse JSON response")
+            // Use JSON mode to hint JSON output
+            let response = match self.generate_internal(&enhanced_prompt, model, true).await {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("LLM API error on attempt {}: {}", attempt, e);
+                    last_error = Some(e);
+                    continue;
+                }
+            };
+
+            // Try to extract JSON from response
+            let json_content = match extract_json_from_text(&response.content) {
+                Some(content) => content,
+                None => {
+                    error!(
+                        "Failed to extract JSON from LLM response (attempt {}). Raw response:\n{}",
+                        attempt, response.content
+                    );
+                    last_error = Some(anyhow::anyhow!(
+                        "No valid JSON found in response. Raw response: {}",
+                        response.content
+                    ));
+
+                    // Don't retry if we're on the last attempt
+                    if attempt < 3 {
+                        warn!("Retrying with clearer JSON instructions...");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    } else {
+                        return Err(last_error.unwrap());
+                    }
+                }
+            };
+
+            // Try to parse the JSON
+            match serde_json::from_str::<T>(&json_content) {
+                Ok(parsed) => {
+                    info!("Successfully parsed JSON response on attempt {}", attempt);
+                    return Ok(parsed);
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to parse JSON on attempt {}: {}. Extracted JSON:\n{}",
+                        attempt, e, json_content
+                    );
+                    last_error = Some(anyhow::anyhow!(
+                        "JSON parse error: {}. Content: {}",
+                        e, json_content
+                    ));
+
+                    if attempt < 3 {
+                        warn!("Retrying with clearer JSON instructions...");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            anyhow::anyhow!("Failed to generate valid JSON after 3 attempts")
+        }))
     }
 
     /// Test if the client is working with a simple prompt
@@ -413,14 +456,13 @@ Please respond with valid JSON only. Do not include any explanation or markdown 
                     "@cf/meta/llama-3.1-8b-instruct".to_string(),
                 ])
             }
-            ProviderClient::Ollama { .. } => {
-                // Return common Ollama models (user should have these pulled)
+            ProviderClient::OpenAI(_) => {
+                // Return common OpenAI models
                 Ok(vec![
-                    "llama4:scout".to_string(),  // Same as @cf/meta/llama-4-scout-17b-16e-instruct
-                    "llama3.2:3b".to_string(),
-                    "llama3.1".to_string(),
-                    "qwen2.5".to_string(),
-                    "mistral".to_string(),
+                    "gpt-5-nano-2025-08-07".to_string(),
+                    "gpt-4-turbo".to_string(),
+                    "gpt-4".to_string(),
+                    "gpt-3.5-turbo".to_string(),
                 ])
             }
         }

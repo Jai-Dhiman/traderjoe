@@ -258,10 +258,10 @@ impl BacktestOrchestrator {
         morning_config.backtest_mode = Some(true);
         morning_config.backtest_date = Some(current_date);
         morning_config.skip_sentiment = Some(self.skip_sentiment);
-        // Override to use Ollama for backtest (local, free inference)
-        morning_config.llm.provider = "ollama".to_string();
-        morning_config.llm.primary_model = "llama3.2:3b".to_string();  // Fast local model for backtesting
-        morning_config.llm.timeout_seconds = 120;  // Smaller model loads quickly
+        // Use OpenAI for backtest (configured in .env)
+        morning_config.llm.provider = "openai".to_string();
+        morning_config.llm.primary_model = "gpt-5-nano-2025-08-07".to_string();
+        morning_config.llm.timeout_seconds = 120;
 
         let morning_orchestrator =
             MorningOrchestrator::new(self.pool.clone(), morning_config).await?;
@@ -272,6 +272,7 @@ impl BacktestOrchestrator {
             .await?;
 
         let confidence = decision.confidence;
+        let action = &decision.action;
 
         // Get the context_id that was just created by analyze_at_date
         // We need to query the most recent context for this symbol
@@ -282,29 +283,20 @@ impl BacktestOrchestrator {
             .map(|c| c.id)
             .context("No context found after analysis")?;
 
-        // Check if we should execute
-        if confidence < 0.50 {
-            let notes = format!(
-                "⏭️  Skipped: {} (confidence {:.1}% < 50%)",
-                decision.action,
-                confidence * 100.0
-            );
-            return Ok(DayResult {
-                date: current_date,
-                decision: Some(decision),
-                executed: false,
-                pnl: None,
-                pnl_pct: None,
-                won: None,
-                playbook_bullets_added: 0,
-                notes,
-            });
+        // Determine if we should execute a trade
+        let should_execute = match action.as_str() {
+            "STAY_FLAT" | "FLAT" => false,
+            _ if confidence < 0.50 => false,
+            _ => true,
+        };
+
+        // EXECUTE TRADE (if applicable)
+        if should_execute {
+            info!("Executing paper trade for context {}", context_id);
+            let _trade_id = self.execute_backtest_trade(context_id, current_date).await?;
+        } else {
+            info!("Skipping trade execution: action={}, confidence={:.1}%", action, confidence * 100.0);
         }
-
-        // EXECUTE TRADE
-        info!("Executing paper trade for context {}", context_id);
-
-        let _trade_id = self.execute_backtest_trade(context_id, current_date).await?;
 
         // EVENING ROUTINE - Compute outcome using next day's data
         let next_date = self.get_next_trading_day(current_date)?;
@@ -314,10 +306,10 @@ impl BacktestOrchestrator {
         let mut evening_config = self.config.clone();
         evening_config.backtest_mode = Some(true);
         evening_config.backtest_date = Some(next_date); // Use next day for outcome
-        // Override to use Ollama for backtest (local, free inference)
-        evening_config.llm.provider = "ollama".to_string();
-        evening_config.llm.primary_model = "llama3.2:3b".to_string();  // Fast local model for backtesting
-        evening_config.llm.timeout_seconds = 120;  // Smaller model loads quickly
+        // Use OpenAI for backtest (configured in .env)
+        evening_config.llm.provider = "openai".to_string();
+        evening_config.llm.primary_model = "gpt-5-nano-2025-08-07".to_string();
+        evening_config.llm.timeout_seconds = 120;
 
         let evening_orchestrator =
             EveningOrchestrator::new(self.pool.clone(), evening_config).await?;
@@ -326,20 +318,32 @@ impl BacktestOrchestrator {
             .review_context_at_date(context_id, next_date)
             .await?;
 
-        let notes = format!(
-            "✅ {}: {:.1}% conf → P&L ${:+.2} ({:+.2}%) {} | Bullets: +{}",
-            decision.action,
-            confidence * 100.0,
-            review_result.outcome.pnl_value,
-            review_result.outcome.pnl_pct,
-            if review_result.outcome.win { "✅" } else { "❌" },
-            review_result.curation_summary.bullets_added
-        );
+        // Format notes based on whether trade was executed
+        let notes = if should_execute {
+            format!(
+                "✅ {}: {:.1}% conf → P&L ${:+.2} ({:+.2}%) {} | Bullets: +{}",
+                decision.action,
+                confidence * 100.0,
+                review_result.outcome.pnl_value,
+                review_result.outcome.pnl_pct,
+                if review_result.outcome.win { "✅" } else { "❌" },
+                review_result.curation_summary.bullets_added
+            )
+        } else {
+            format!(
+                "⏸️  {}: {:.1}% conf → P&L ${:+.2} (opp cost) {} | Bullets: +{}",
+                decision.action,
+                confidence * 100.0,
+                review_result.outcome.pnl_value,
+                if review_result.outcome.win { "✅" } else { "❌" },
+                review_result.curation_summary.bullets_added
+            )
+        };
 
         Ok(DayResult {
             date: current_date,
             decision: Some(decision),
-            executed: true,
+            executed: should_execute,
             pnl: Some(review_result.outcome.pnl_value),
             pnl_pct: Some(review_result.outcome.pnl_pct),
             won: Some(review_result.outcome.win),
@@ -354,7 +358,7 @@ impl BacktestOrchestrator {
         context_id: Uuid,
         trade_date: NaiveDate,
     ) -> Result<Uuid> {
-        use crate::trading::{PaperTradingEngine, PositionSizer, SlippageCalculator, TradeType};
+        use crate::trading::{PaperTradingEngine, PositionSizer, RiskManager, SlippageCalculator, TradeType};
 
         // Load context
         let context_dao = ContextDAO::new(self.pool.clone());
@@ -372,14 +376,33 @@ impl BacktestOrchestrator {
 
         let confidence = context.confidence.unwrap_or(0.0);
 
+        // Extract VIX from market state for risk management
+        let vix = context
+            .market_state
+            .get("market_data")
+            .and_then(|d| d.get("vix"))
+            .and_then(|v| v.as_f64());
+
+        // Initialize risk manager
+        let risk_manager = RiskManager::with_defaults();
+
+        // Check VIX-based trading restrictions
+        risk_manager.check_vix_restriction(vix, confidence as f64)?;
+
         // Get account for position sizing
         let account_mgr = AccountManager::new(self.pool.clone());
         let account = account_mgr.get_current_account().await?;
 
-        // Calculate position size
+        // Calculate base position size
         let position_sizer = PositionSizer::default();
-        let position_size =
+        let base_position_size =
             position_sizer.calculate_position_size_simple(account.balance, confidence as f64)?;
+
+        // Apply volatility adjustment to position size
+        let position_size = risk_manager.calculate_volatility_adjusted_position_size(
+            base_position_size,
+            vix,
+        );
 
         // Get current price from market state
         let current_price = context
@@ -388,13 +411,6 @@ impl BacktestOrchestrator {
             .and_then(|d| d.get("latest_price"))
             .and_then(|p| p.as_f64())
             .context("Could not get current price from market state")?;
-
-        // Extract VIX from market state for slippage calculation
-        let vix = context
-            .market_state
-            .get("market_data")
-            .and_then(|d| d.get("vix"))
-            .and_then(|v| v.as_f64());
 
         // Calculate realistic slippage based on market conditions
         let slippage_calc = SlippageCalculator::with_defaults();
@@ -410,12 +426,20 @@ impl BacktestOrchestrator {
         let trade_type = match action {
             "BUY_CALLS" => TradeType::Call,
             "BUY_PUTS" => TradeType::Put,
-            _ => TradeType::Flat,
+            _ => anyhow::bail!("Invalid trade action: {} (should have been caught earlier)", action),
         };
 
-        if trade_type == TradeType::Flat {
-            anyhow::bail!("Invalid trade type: {}", action);
-        }
+        // Calculate and log risk management levels
+        let is_option = true; // Trading SPY options
+        let stop_loss_price = risk_manager.get_stop_loss_price(current_price, &trade_type, is_option);
+        let take_profit_price = risk_manager.get_take_profit_price(current_price, &trade_type, is_option);
+
+        info!(
+            "Risk levels for {} trade: Stop-Loss @ ${:.2} (-15%), Take-Profit @ ${:.2} (+50%)",
+            trade_type,
+            stop_loss_price,
+            take_profit_price
+        );
 
         // Calculate shares (contracts)
         let shares = (position_size / (current_price * 100.0)).floor().max(1.0);

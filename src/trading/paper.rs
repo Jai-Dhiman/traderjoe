@@ -29,6 +29,8 @@ pub enum ExitReason {
     AutoExit,
     StopLoss,
     TakeProfit,
+    TrailingStop,
+    TimeBasedExit,
     Manual,
     CircuitBreaker,
 }
@@ -903,6 +905,8 @@ impl std::fmt::Display for ExitReason {
             ExitReason::AutoExit => write!(f, "AUTO_EXIT"),
             ExitReason::StopLoss => write!(f, "STOP_LOSS"),
             ExitReason::TakeProfit => write!(f, "TAKE_PROFIT"),
+            ExitReason::TrailingStop => write!(f, "TRAILING_STOP"),
+            ExitReason::TimeBasedExit => write!(f, "TIME_BASED_EXIT"),
             ExitReason::Manual => write!(f, "MANUAL"),
             ExitReason::CircuitBreaker => write!(f, "CIRCUIT_BREAKER"),
         }

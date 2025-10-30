@@ -164,6 +164,47 @@ pub fn validate_trading_decision(decision: &serde_json::Value) -> Result<(), Str
         return Err("reasoning cannot be empty".to_string());
     }
 
+    // NEW VALIDATION: Check for dismissive language about risk factors
+    let dismissive_phrases = [
+        "but not concerning",
+        "but not worrisome",
+        "not concerning due to",
+        "but we proceed anyway",
+        "but don't affect",
+        "doesn't affect the decision",
+        "noted but",
+        "acknowledged but",
+        "present but not significant",
+    ];
+
+    let reasoning_lower = reasoning.to_lowercase();
+    for phrase in &dismissive_phrases {
+        if reasoning_lower.contains(phrase) {
+            return Err(format!(
+                "Decision dismisses risk factors with phrase '{}'. Risk factors MUST reduce confidence, not be dismissed.",
+                phrase
+            ));
+        }
+    }
+
+    // NEW VALIDATION: Check confidence vs risk factor count
+    // If multiple risk factors exist, confidence should be reduced accordingly
+    if risk_factors.len() >= 2 && confidence > 0.70 {
+        return Err(format!(
+            "Confidence {:.2} is too high given {} risk factors. With 2+ risk factors, confidence should be <= 0.70",
+            confidence,
+            risk_factors.len()
+        ));
+    }
+
+    if risk_factors.len() >= 3 && confidence > 0.65 {
+        return Err(format!(
+            "Confidence {:.2} is too high given {} risk factors. With 3+ risk factors, confidence should be <= 0.65 or consider STAY_FLAT",
+            confidence,
+            risk_factors.len()
+        ));
+    }
+
     Ok(())
 }
 

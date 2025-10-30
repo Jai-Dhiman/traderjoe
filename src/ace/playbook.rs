@@ -106,6 +106,26 @@ impl PlaybookBullet {
             && self.harmful_count > self.helpful_count
             && self.is_stale(max_staleness_days)
     }
+
+    /// Check if bullet should be pruned with effectiveness ratio
+    pub fn should_prune_with_effectiveness(
+        &self,
+        min_confidence: f32,
+        max_staleness_days: i64,
+        min_effectiveness: f32,
+    ) -> bool {
+        let has_low_confidence = self.confidence < min_confidence;
+        let has_low_effectiveness = self.effectiveness_ratio() < min_effectiveness;
+        let is_stale = self.is_stale(max_staleness_days);
+
+        // Prune if ANY of these conditions:
+        // 1. Low confidence AND low effectiveness AND stale
+        // 2. Low confidence AND very harmful (effectiveness < 0.3)
+        // 3. Very low confidence (< 0.35) AND stale
+        (has_low_confidence && has_low_effectiveness && is_stale)
+            || (has_low_confidence && self.effectiveness_ratio() < 0.3)
+            || (self.confidence < 0.35 && is_stale)
+    }
 }
 
 /// Playbook query filters

@@ -2,7 +2,10 @@
 // Provides HNSW indexing and efficient similarity search for embeddings
 
 mod pgvector_sqlx;
+mod reranker;
+
 pub use pgvector_sqlx::PgVector;
+pub use reranker::Reranker;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

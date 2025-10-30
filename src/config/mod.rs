@@ -33,13 +33,13 @@ pub struct ApiConfig {
     pub reddit_client_secret: Option<String>,
     pub cloudflare_account_id: Option<String>,
     pub cloudflare_api_token: Option<String>,
+    pub openai_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    pub provider: String, // "workers_ai" or "ollama"
+    pub provider: String, // "workers_ai" or "openai"
     pub workers_ai_url: String,
-    pub ollama_url: String,
     pub primary_model: String,
     pub fallback_model: String,
     pub timeout_seconds: u64,
@@ -54,9 +54,42 @@ pub struct TradingConfig {
 }
 
 impl Config {
+    /// Returns the effective datetime for operations, respecting backtest mode.
+    /// In backtest mode, returns the backtest_date at 9:30 AM (market open).
+    /// In live mode, returns the current time.
+    pub fn get_effective_datetime(&self) -> chrono::DateTime<chrono::Utc> {
+        if let Some(backtest_date) = self.backtest_date {
+            backtest_date
+                .and_hms_opt(9, 30, 0)
+                .expect("Invalid time: 9:30:00")
+                .and_utc()
+        } else {
+            chrono::Utc::now()
+        }
+    }
+
+    /// Returns the effective date for operations, respecting backtest mode.
+    /// In backtest mode, returns the backtest_date.
+    /// In live mode, returns the current date.
+    pub fn get_effective_date(&self) -> chrono::NaiveDate {
+        self.backtest_date.unwrap_or_else(|| chrono::Utc::now().date_naive())
+    }
+
     pub fn load() -> Result<Self> {
-        // Load .env file if it exists (fail silently if not found)
+        // Load .env file - this sets env vars that aren't already set
         dotenv::dotenv().ok();
+
+        // Force override critical LLM config from .env file if it exists
+        // This ensures .env file takes precedence over shell environment
+        if let Ok(vars) = dotenv::from_filename_iter(".env") {
+            for item in vars {
+                if let Ok((key, val)) = item {
+                    if key == "LLM_PROVIDER" || key == "PRIMARY_MODEL" || key == "FALLBACK_MODEL" {
+                        env::set_var(&key, &val);
+                    }
+                }
+            }
+        }
 
         // Database configuration - DATABASE_URL is required
         let database_url = env::var("DATABASE_URL")
@@ -80,26 +113,25 @@ impl Config {
                 reddit_client_secret: env::var("REDDIT_CLIENT_SECRET").ok(),
                 cloudflare_account_id: env::var("CLOUDFLARE_ACCOUNT_ID").ok(),
                 cloudflare_api_token: env::var("CLOUDFLARE_API_TOKEN").ok(),
+                openai_api_key: env::var("OPENAI_API_KEY").ok(),
             },
             llm: LlmConfig {
                 provider: {
-                    let provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "workers_ai".to_string());
+                    let provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
                     eprintln!("🔧 Config: LLM_PROVIDER = {}", provider);
                     provider
                 },
                 workers_ai_url: env::var("WORKERS_AI_URL")
                     .unwrap_or_else(|_| "https://api.cloudflare.com/client/v4/accounts".to_string()),
-                ollama_url: env::var("OLLAMA_URL")
-                    .unwrap_or_else(|_| "http://localhost:11434/v1".to_string()),
                 primary_model: {
                     let model = env::var("PRIMARY_MODEL")
-                        .unwrap_or_else(|_| "@cf/meta/llama-4-scout-17b-16e-instruct".to_string());
+                        .unwrap_or_else(|_| "gpt-5-nano-2025-08-07".to_string());
                     eprintln!("🔧 Config: PRIMARY_MODEL = {}", model);
                     model
                 },
                 fallback_model: {
                     let model = env::var("FALLBACK_MODEL")
-                        .unwrap_or_else(|_| "@cf/meta/llama-4-scout-17b-16e-instruct".to_string());
+                        .unwrap_or_else(|_| "gpt-5-nano-2025-08-07".to_string());
                     eprintln!("🔧 Config: FALLBACK_MODEL = {}", model);
                     model
                 },
@@ -150,13 +182,13 @@ impl Default for Config {
                 reddit_client_secret: None,
                 cloudflare_account_id: None,
                 cloudflare_api_token: None,
+                openai_api_key: None,
             },
             llm: LlmConfig {
-                provider: "workers_ai".to_string(),
+                provider: "openai".to_string(),
                 workers_ai_url: "https://api.cloudflare.com/client/v4/accounts".to_string(),
-                ollama_url: "http://localhost:11434".to_string(),
-                primary_model: "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
-                fallback_model: "@cf/meta/llama-4-scout-17b-16e-instruct".to_string(),
+                primary_model: "gpt-5-nano-2025-08-07".to_string(),
+                fallback_model: "gpt-5-nano-2025-08-07".to_string(),
                 timeout_seconds: 30,
             },
             trading: TradingConfig {

@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -35,18 +35,27 @@ pub struct CuratorConfig {
     pub enable_proactive_pruning: bool,
     /// Minimum playbook size before pruning is enabled
     pub min_bullets_for_pruning: usize,
+    /// Minimum effectiveness ratio (helpful/(helpful+harmful)) to keep bullet
+    pub min_effectiveness_ratio: f32,
+    /// Maximum bullets allowed per section (hard cap to prevent inflation)
+    pub max_bullets_per_section: usize,
+    /// Maximum total bullets in playbook (hard cap)
+    pub max_total_bullets: usize,
 }
 
 impl Default for CuratorConfig {
     fn default() -> Self {
         Self {
             max_context_bullets: 50,
-            min_confidence_for_pruning: 0.2,
-            staleness_threshold_days: 30,
+            min_confidence_for_pruning: 0.45,  // Raised from 0.2 to 0.45 (more aggressive)
+            staleness_threshold_days: 14,      // Reduced from 30 to 14 days
             auto_update_usage: true,
             max_deltas_per_batch: 100,
-            enable_proactive_pruning: true,  // Enable ACE proactive refinement by default
-            min_bullets_for_pruning: 50,     // Start pruning after 50 bullets
+            enable_proactive_pruning: true,     // Enable ACE proactive refinement by default
+            min_bullets_for_pruning: 50,        // Start pruning after 50 bullets
+            min_effectiveness_ratio: 0.55,      // helpful/(helpful+harmful) must be > 55%
+            max_bullets_per_section: 20,        // Hard cap per section
+            max_total_bullets: 150,             // Hard cap total
         }
     }
 }
@@ -161,6 +170,8 @@ pub struct Curator {
     generator: Generator,
     reflector: Reflector,
     config: CuratorConfig,
+    /// Reference time for filtering operations (backtest_date in backtest mode, current time in live mode)
+    reference_time: chrono::DateTime<chrono::Utc>,
 }
 
 impl Curator {
@@ -194,6 +205,7 @@ impl Curator {
             generator,
             reflector,
             config,
+            reference_time: created_at.unwrap_or_else(|| chrono::Utc::now()),
         })
     }
 
@@ -210,7 +222,7 @@ impl Curator {
         // Get existing playbook for context
         let existing_playbook = self
             .playbook_dao
-            .get_recent_bullets(7, self.config.max_context_bullets, chrono::Utc::now())
+            .get_recent_bullets(7, self.config.max_context_bullets, self.reference_time)
             .await
             .context("Failed to get existing playbook for context")?;
 
@@ -264,7 +276,7 @@ impl Curator {
         // Identify which bullets were referenced in the decision
         let available_bullets = self
             .playbook_dao
-            .get_recent_bullets(30, 100, chrono::Utc::now())
+            .get_recent_bullets(30, 100, self.reference_time)
             .await
             .context("Failed to get bullets for reference identification")?;
 
@@ -291,7 +303,7 @@ impl Curator {
             outcome,
             referenced_bullets,
             context_id,
-            date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            date: self.reference_time.date_naive().format("%Y-%m-%d").to_string(),
         };
 
         // Generate reflection deltas
@@ -402,24 +414,46 @@ impl Curator {
     pub async fn prune_playbook(&self) -> Result<usize> {
         info!("Starting ACE playbook refinement (pruning low-confidence/stale bullets)");
 
-        // Get all bullets that should be pruned
+        // Get playbook stats to check if we need aggressive pruning
+        let stats = self.playbook_dao.get_stats().await?;
+        let section_counts = self.playbook_dao.get_section_counts().await?;
+
+        info!(
+            "Playbook status: {} total bullets ({} sections)",
+            stats.total_bullets,
+            section_counts.len()
+        );
+
+        let mut pruned_count = 0;
+        let mut pruned_by_reason = std::collections::HashMap::new();
+
+        // Phase 1: Prune bullets that meet quality thresholds
         let candidates = self
             .playbook_dao
             .get_stale_bullets(self.config.staleness_threshold_days)
             .await?;
 
-        let mut pruned_count = 0;
-
         for bullet in candidates {
-            // Check if bullet should be pruned based on performance
-            if bullet.should_prune(
+            // Check if bullet should be pruned based on performance with effectiveness ratio
+            if bullet.should_prune_with_effectiveness(
                 self.config.min_confidence_for_pruning,
                 self.config.staleness_threshold_days,
+                self.config.min_effectiveness_ratio,
             ) {
+                let reason = if bullet.effectiveness_ratio() < 0.3 {
+                    "very_harmful"
+                } else if bullet.confidence < 0.35 {
+                    "very_low_confidence"
+                } else {
+                    "low_quality_and_stale"
+                };
+
                 info!(
-                    "Pruning bullet {} (confidence: {:.3}, helpful: {}, harmful: {}): {}",
+                    "Pruning bullet {} ({}) [conf: {:.3}, effectiveness: {:.3}, helpful: {}, harmful: {}]: {}",
                     bullet.id,
+                    reason,
                     bullet.confidence,
+                    bullet.effectiveness_ratio(),
                     bullet.helpful_count,
                     bullet.harmful_count,
                     bullet.content.chars().take(60).collect::<String>()
@@ -427,13 +461,79 @@ impl Curator {
 
                 self.playbook_dao.delete_bullet(bullet.id).await?;
                 pruned_count += 1;
+                *pruned_by_reason.entry(reason).or_insert(0) += 1;
             }
         }
 
+        // Phase 2: Enforce per-section caps if needed
+        for (section, count) in section_counts {
+            if count > self.config.max_bullets_per_section {
+                let excess = count - self.config.max_bullets_per_section;
+                info!(
+                    "Section {:?} has {} bullets (max: {}), pruning {} oldest low-confidence bullets",
+                    section, count, self.config.max_bullets_per_section, excess
+                );
+
+                // Get all bullets in this section, sorted by confidence (ascending) then age (oldest first)
+                let section_bullets = self.playbook_dao.get_by_section(section.clone(), None).await?;
+
+                // Sort by confidence (lowest first), then by age (oldest first)
+                let mut sorted_bullets = section_bullets;
+                sorted_bullets.sort_by(|a, b| {
+                    a.confidence
+                        .partial_cmp(&b.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.created_at.cmp(&b.created_at))
+                });
+
+                // Prune the lowest-confidence, oldest bullets
+                for bullet in sorted_bullets.iter().take(excess) {
+                    info!(
+                        "Pruning excess bullet {} from section {:?} [conf: {:.3}]: {}",
+                        bullet.id,
+                        section,
+                        bullet.confidence,
+                        bullet.content.chars().take(60).collect::<String>()
+                    );
+
+                    self.playbook_dao.delete_bullet(bullet.id).await?;
+                    pruned_count += 1;
+                    *pruned_by_reason.entry("section_cap").or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Phase 3: Enforce total playbook cap if still over limit
+        let updated_stats = self.playbook_dao.get_stats().await?;
+        if updated_stats.total_bullets > self.config.max_total_bullets {
+            let excess = updated_stats.total_bullets - self.config.max_total_bullets;
+            info!(
+                "Total playbook has {} bullets (max: {}), pruning {} lowest-confidence bullets",
+                updated_stats.total_bullets, self.config.max_total_bullets, excess
+            );
+
+            // This would require a get_all_bullets method - for now, log a warning
+            warn!(
+                "Playbook size {} exceeds maximum {}. Consider manual pruning or lowering section caps.",
+                updated_stats.total_bullets, self.config.max_total_bullets
+            );
+        }
+
+        // Log detailed pruning statistics
+        info!("ACE refinement complete: {} bullets pruned from playbook", pruned_count);
+        if !pruned_by_reason.is_empty() {
+            info!("Pruning breakdown:");
+            for (reason, count) in pruned_by_reason {
+                info!("  - {}: {} bullets", reason, count);
+            }
+        }
+
+        let final_stats = self.playbook_dao.get_stats().await?;
         info!(
-            "ACE refinement complete: {} bullets pruned from playbook",
-            pruned_count
+            "Final playbook size: {} bullets (was {})",
+            final_stats.total_bullets, stats.total_bullets
         );
+
         Ok(pruned_count)
     }
 

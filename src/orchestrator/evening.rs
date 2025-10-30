@@ -16,7 +16,7 @@ use crate::{
     config::Config,
     data::MarketDataClient,
     llm::LLMClient,
-    trading::{AccountManager, PaperTradingEngine},
+    trading::{black_scholes, AccountManager, PaperTradingEngine},
 };
 
 /// Result of evening review analysis
@@ -222,7 +222,7 @@ impl EveningOrchestrator {
             "mfe": outcome.mfe,
             "mae": outcome.mae,
             "notes": outcome.notes,
-            "reviewed_at": Utc::now().to_rfc3339(),
+            "reviewed_at": self._config.get_effective_datetime().to_rfc3339(),
         });
 
         self.context_dao
@@ -389,7 +389,7 @@ impl EveningOrchestrator {
         info!("Fetching current price for {} to compute outcome", symbol);
         let current_data = self
             .market_client
-            .fetch_latest(symbol)
+            .fetch_latest_with_date(symbol, self._config.backtest_date)
             .await
             .context("Failed to fetch current market data")?;
 
@@ -399,41 +399,197 @@ impl EveningOrchestrator {
             .ok_or_else(|| anyhow::anyhow!("Missing close price in current data"))?;
 
         // Calculate time duration
-        let now = Utc::now();
+        let now = self._config.get_effective_datetime();
         let duration_hours = (now - context.timestamp).num_seconds() as f64 / 3600.0;
 
-        // Determine trade direction and calculate P&L
-        let (pnl_value, pnl_pct) = match decision.action.as_str() {
+        // Extract volatility from market_state for Black-Scholes
+        let volatility_pct = context
+            .market_state
+            .get("market_data")
+            .and_then(|d| d.get("volatility_20d"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(2.0); // Default 2% daily volatility if not available
+
+        // Convert to annualized volatility for Black-Scholes (daily_vol * sqrt(252))
+        let annualized_vol = (volatility_pct / 100.0) * f64::sqrt(252.0);
+
+        // Risk-free rate (approximate 5% annually, or daily rate)
+        let risk_free_rate = 0.05;
+
+        // Time to expiry in years (for 0-1 DTE, this is very small)
+        let entry_time_to_expiry = 1.0 / 365.0; // 1 day at entry
+        let exit_time_to_expiry = f64::max(0.0, entry_time_to_expiry - (duration_hours / 24.0 / 365.0));
+
+        // Determine trade direction and calculate P&L using Black-Scholes
+        let (pnl_value, pnl_pct, win, notes) = match decision.action.as_str() {
             "BUY_CALLS" | "BULLISH" => {
-                // Profit if price went up
-                let pct_change = ((exit_price - entry_price) / entry_price) * 100.0;
-                let value = pct_change * 10.0; // Simplified: assume $10 per 1% move
-                (value, pct_change)
+                // Calculate option prices using Black-Scholes
+                // Use 30-delta call (typical for 0-1 DTE strategies)
+                let strike = black_scholes::strike_from_delta(
+                    entry_price,
+                    0.30,
+                    annualized_vol,
+                    entry_time_to_expiry,
+                    true,
+                );
+
+                let entry_option_price = black_scholes::call_price(
+                    entry_price,
+                    strike,
+                    risk_free_rate,
+                    annualized_vol,
+                    entry_time_to_expiry,
+                );
+
+                let exit_option_price = black_scholes::call_price(
+                    exit_price,
+                    strike,
+                    risk_free_rate,
+                    annualized_vol,
+                    exit_time_to_expiry,
+                );
+
+                // Calculate P&L based on option price movement
+                // Assume 10 contracts * 100 shares/contract = 1000 shares equivalent
+                let contracts = 10.0;
+                let pnl_per_contract = (exit_option_price - entry_option_price) * 100.0; // Options are per 100 shares
+                let total_pnl = pnl_per_contract * contracts;
+                let pnl_pct = (total_pnl / (entry_option_price * 100.0 * contracts)) * 100.0;
+
+                let win = total_pnl > 0.0;
+                let notes_text = format!(
+                    "Call option: strike=${:.2}, entry=${:.2}, exit=${:.2}, {} contracts",
+                    strike, entry_option_price, exit_option_price, contracts as i32
+                );
+
+                (total_pnl, pnl_pct, win, Some(notes_text))
             }
             "BUY_PUTS" | "BEARISH" => {
-                // Profit if price went down
-                let pct_change = ((entry_price - exit_price) / entry_price) * 100.0;
-                let value = pct_change * 10.0;
-                (value, pct_change)
+                // Calculate put option prices using Black-Scholes
+                // Use 30-delta put (typical for 0-1 DTE strategies)
+                let strike = black_scholes::strike_from_delta(
+                    entry_price,
+                    -0.30,
+                    annualized_vol,
+                    entry_time_to_expiry,
+                    false,
+                );
+
+                let entry_option_price = black_scholes::put_price(
+                    entry_price,
+                    strike,
+                    risk_free_rate,
+                    annualized_vol,
+                    entry_time_to_expiry,
+                );
+
+                let exit_option_price = black_scholes::put_price(
+                    exit_price,
+                    strike,
+                    risk_free_rate,
+                    annualized_vol,
+                    exit_time_to_expiry,
+                );
+
+                // Calculate P&L
+                let contracts = 10.0;
+                let pnl_per_contract = (exit_option_price - entry_option_price) * 100.0;
+                let total_pnl = pnl_per_contract * contracts;
+                let pnl_pct = (total_pnl / (entry_option_price * 100.0 * contracts)) * 100.0;
+
+                let win = total_pnl > 0.0;
+                let notes_text = format!(
+                    "Put option: strike=${:.2}, entry=${:.2}, exit=${:.2}, {} contracts",
+                    strike, entry_option_price, exit_option_price, contracts as i32
+                );
+
+                (total_pnl, pnl_pct, win, Some(notes_text))
+            }
+            "STAY_FLAT" | "FLAT" => {
+                // Calculate opportunity cost of not trading
+                let price_move_pct = ((exit_price - entry_price) / entry_price) * 100.0;
+                let abs_move = price_move_pct.abs();
+
+                // Evaluate if staying flat was the correct decision
+                let (opportunity_cost, was_correct, reason) = if abs_move < 0.5 {
+                    // Market barely moved - staying flat was correct
+                    (0.0, true, format!(
+                        "STAY_FLAT was correct: Market moved only {:+.2}% (< 0.5% threshold). No significant opportunity missed.",
+                        price_move_pct
+                    ))
+                } else {
+                    // Market moved significantly - calculate missed opportunity using Black-Scholes
+                    // Determine what the best trade would have been based on price direction
+                    let (is_call, strike) = if price_move_pct > 0.0 {
+                        // Price went up - we should have bought calls
+                        let strike = black_scholes::strike_from_delta(
+                            entry_price,
+                            0.30,
+                            annualized_vol,
+                            entry_time_to_expiry,
+                            true,
+                        );
+                        (true, strike)
+                    } else {
+                        // Price went down - we should have bought puts
+                        let strike = black_scholes::strike_from_delta(
+                            entry_price,
+                            -0.30,
+                            annualized_vol,
+                            entry_time_to_expiry,
+                            false,
+                        );
+                        (false, strike)
+                    };
+
+                    // Calculate what we could have made
+                    let (entry_price_opt, exit_price_opt) = if is_call {
+                        (
+                            black_scholes::call_price(entry_price, strike, risk_free_rate, annualized_vol, entry_time_to_expiry),
+                            black_scholes::call_price(exit_price, strike, risk_free_rate, annualized_vol, exit_time_to_expiry),
+                        )
+                    } else {
+                        (
+                            black_scholes::put_price(entry_price, strike, risk_free_rate, annualized_vol, entry_time_to_expiry),
+                            black_scholes::put_price(exit_price, strike, risk_free_rate, annualized_vol, exit_time_to_expiry),
+                        )
+                    };
+
+                    let contracts = 10.0;
+                    let missed_pnl = (exit_price_opt - entry_price_opt) * 100.0 * contracts;
+
+                    (
+                        -missed_pnl,
+                        false,
+                        format!(
+                            "STAY_FLAT was suboptimal: Market moved {:+.2}% (>= 0.5%). Missed {} opportunity: ${:.2}",
+                            price_move_pct,
+                            if is_call { "CALL" } else { "PUT" },
+                            missed_pnl
+                        )
+                    )
+                };
+
+                let detailed_notes = format!(
+                    "{} Entry: ${:.2}, Exit: ${:.2}, Duration: {:.1}h, Vol: {:.1}%",
+                    reason, entry_price, exit_price, duration_hours, volatility_pct
+                );
+
+                (opportunity_cost, price_move_pct, was_correct, Some(detailed_notes))
             }
             _ => {
-                // STAY_FLAT or unknown action
-                (0.0, 0.0)
+                // Unknown action
+                (0.0, 0.0, false, Some("Unknown action type".to_string()))
             }
         };
 
-        let win = pnl_value > 0.0;
-
-        // Try to get MFE/MAE from paper trading engine if available
-        let (mfe, mae) = self
-            .get_excursions(context.id)
-            .await
-            .unwrap_or((None, None));
-
-        let notes = if decision.action == "STAY_FLAT" {
-            Some("No trade taken (stayed flat)".to_string())
+        // Try to get MFE/MAE from paper trading engine if available (only for actual trades)
+        let (mfe, mae) = if decision.action != "STAY_FLAT" && decision.action != "FLAT" {
+            self.get_excursions(context.id)
+                .await
+                .unwrap_or((None, None))
         } else {
-            None
+            (None, None)
         };
 
         Ok(TradingOutcome {
@@ -454,6 +610,8 @@ impl EveningOrchestrator {
         &self,
         context: &crate::ace::context::AceContext,
     ) -> Result<()> {
+        use crate::trading::RiskManager;
+
         // Get all open positions
         let open_positions = self._paper_trading.get_open_positions().await?;
 
@@ -468,8 +626,11 @@ impl EveningOrchestrator {
             return Ok(());
         }
 
-        info!("Found {} open trade(s) for context {}, closing with backtest mode exit price",
+        info!("Found {} open trade(s) for context {}, checking for stop-loss/take-profit",
               context_trades.len(), context.id);
+
+        // Initialize risk manager for stop-loss/take-profit checks
+        let risk_manager = RiskManager::with_defaults();
 
         // Get symbol from context
         let symbol = context
@@ -507,14 +668,57 @@ impl EveningOrchestrator {
             .and_then(|c| c.as_f64())
             .ok_or_else(|| anyhow::anyhow!("Missing close price in market data"))?;
 
-        // Close each trade
+        // Close each trade with risk management checks
         for trade in context_trades {
-            info!("Closing trade {} at exit price ${:.2}", trade.id, exit_price);
+            let is_option = true; // SPY options
+
+            // Check for stop-loss trigger
+            let stop_loss_hit = risk_manager
+                .check_stop_loss(trade.entry_price, exit_price, &trade.trade_type, is_option)?;
+
+            // Check for take-profit trigger
+            let take_profit_hit = risk_manager
+                .check_take_profit(trade.entry_price, exit_price, &trade.trade_type, is_option)?;
+
+            // Check for trailing stop trigger
+            let trailing_stop_hit = risk_manager
+                .check_trailing_stop(
+                    trade.entry_price,
+                    exit_price,
+                    trade.max_favorable_excursion,
+                    &trade.trade_type
+                )?;
+
+            // Check for time-based exit (same-day trades at market close)
+            // Use current time if exit_time is None (live trading)
+            let current_time_for_check = exit_time.unwrap_or_else(|| chrono::Utc::now());
+            let time_based_exit = risk_manager
+                .check_time_based_exit(trade.entry_time, current_time_for_check)?;
+
+            // Determine exit reason based on risk management checks
+            // Priority: stop-loss > trailing stop > time-based > take-profit > auto
+            let exit_reason = if stop_loss_hit {
+                crate::trading::ExitReason::StopLoss
+            } else if trailing_stop_hit {
+                crate::trading::ExitReason::TrailingStop
+            } else if time_based_exit {
+                crate::trading::ExitReason::TimeBasedExit
+            } else if take_profit_hit {
+                crate::trading::ExitReason::TakeProfit
+            } else {
+                crate::trading::ExitReason::AutoExit
+            };
+
+            info!(
+                "Closing trade {} at exit price ${:.2} (reason: {:?})",
+                trade.id, exit_price, exit_reason
+            );
+
             let closed_trade = self._paper_trading
                 .exit_trade_with_time(
                     trade.id,
                     exit_price,
-                    crate::trading::ExitReason::AutoExit,
+                    exit_reason,
                     exit_time,
                 )
                 .await?;

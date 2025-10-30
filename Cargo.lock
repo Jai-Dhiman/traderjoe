@@ -3904,6 +3904,7 @@ dependencies = [
  "futures",
  "insta",
  "lazy_static",
+ "libm",
  "mockall",
  "proptest",
  "rand 0.8.5",

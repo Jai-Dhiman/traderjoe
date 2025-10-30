@@ -274,8 +274,20 @@ impl MarketDataClient {
     }
 
     /// Fetch OHLCV data for the last N days (convenience wrapper)
+    /// If end_date is provided, uses that as the end date (for backtest mode).
+    /// Otherwise, uses the current date (for live mode).
     pub async fn fetch_ohlcv(&self, symbol: &str, days: u32) -> DataResult<Vec<OHLCV>> {
-        let end_date = Utc::now().date_naive();
+        self.fetch_ohlcv_with_end_date(symbol, days, None).await
+    }
+
+    /// Fetch OHLCV data for the last N days with optional end date
+    pub async fn fetch_ohlcv_with_end_date(
+        &self,
+        symbol: &str,
+        days: u32,
+        end_date: Option<NaiveDate>,
+    ) -> DataResult<Vec<OHLCV>> {
+        let end_date = end_date.unwrap_or_else(|| Utc::now().date_naive());
         let start_date = end_date - chrono::Duration::days(days as i64);
         self.fetch_ohlcv_range(symbol, start_date, end_date).await
     }
@@ -354,10 +366,20 @@ impl MarketDataClient {
     }
 
     /// Fetch latest market data as JSON (for evening review)
+    /// If target_date is provided, uses that date (for backtest mode).
+    /// Otherwise, uses the current date (for live mode).
     pub async fn fetch_latest(&self, symbol: &str) -> DataResult<serde_json::Value> {
-        // Use today's date
-        let today = Utc::now().date_naive();
-        self.fetch_for_date(symbol, today).await
+        self.fetch_latest_with_date(symbol, None).await
+    }
+
+    /// Fetch latest market data with optional target date
+    pub async fn fetch_latest_with_date(
+        &self,
+        symbol: &str,
+        target_date: Option<NaiveDate>,
+    ) -> DataResult<serde_json::Value> {
+        let date = target_date.unwrap_or_else(|| Utc::now().date_naive());
+        self.fetch_for_date(symbol, date).await
     }
 
     /// Fetch current VIX value (volatility index)

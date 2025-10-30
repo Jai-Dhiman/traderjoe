@@ -36,9 +36,10 @@ fn create_test_config() -> Config {
             min_connections: 1,
         },
         llm: LlmConfig {
-            ollama_url: "http://localhost:11434".to_string(),
-            primary_model: "llama3.2:3b".to_string(),
-            fallback_model: "gpt-4o-mini".to_string(),
+            provider: "openai".to_string(),
+            workers_ai_url: "https://api.cloudflare.com/client/v4/accounts".to_string(),
+            primary_model: "gpt-5-nano-2025-08-07".to_string(),
+            fallback_model: "gpt-5-nano-2025-08-07".to_string(),
             timeout_seconds: 30,
         },
         apis: ApiConfig {

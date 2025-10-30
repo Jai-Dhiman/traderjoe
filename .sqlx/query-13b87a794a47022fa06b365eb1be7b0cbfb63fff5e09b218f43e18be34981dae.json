@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) as total_trades,\n                COUNT(CASE WHEN (outcome->>'win')::boolean = true THEN 1 END) as wins,\n                COUNT(CASE WHEN (outcome->>'win')::boolean = false THEN 1 END) as losses,\n                AVG(CASE WHEN outcome->>'pnl_pct' IS NOT NULL\n                    THEN (outcome->>'pnl_pct')::float END) as avg_pnl_pct,\n                SUM(CASE WHEN outcome->>'pnl_value' IS NOT NULL\n                    THEN (outcome->>'pnl_value')::float END) as total_pnl,\n                AVG(CASE WHEN outcome->>'duration_hours' IS NOT NULL\n                    THEN (outcome->>'duration_hours')::float END) as avg_duration_hours\n            FROM ace_contexts\n            WHERE timestamp >= $1 AND outcome IS NOT NULL\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_trades",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "wins",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "losses",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "avg_pnl_pct",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "total_pnl",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "avg_duration_hours",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "13b87a794a47022fa06b365eb1be7b0cbfb63fff5e09b218f43e18be34981dae"
+}
