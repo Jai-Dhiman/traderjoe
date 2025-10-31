@@ -47,13 +47,13 @@ impl Default for CuratorConfig {
     fn default() -> Self {
         Self {
             max_context_bullets: 50,
-            min_confidence_for_pruning: 0.45,  // Raised from 0.2 to 0.45 (more aggressive)
-            staleness_threshold_days: 14,      // Reduced from 30 to 14 days
+            min_confidence_for_pruning: 0.50,  // Raised from 0.45 to 0.50 (more aggressive)
+            staleness_threshold_days: 10,      // Reduced from 14 to 10 days (more aggressive)
             auto_update_usage: true,
             max_deltas_per_batch: 100,
             enable_proactive_pruning: true,     // Enable ACE proactive refinement by default
-            min_bullets_for_pruning: 50,        // Start pruning after 50 bullets
-            min_effectiveness_ratio: 0.55,      // helpful/(helpful+harmful) must be > 55%
+            min_bullets_for_pruning: 40,        // Reduced from 50 to 40 (prune earlier)
+            min_effectiveness_ratio: 0.60,      // Raised from 0.55 to 0.60 (more aggressive)
             max_bullets_per_section: 20,        // Hard cap per section
             max_total_bullets: 150,             // Hard cap total
         }
@@ -317,6 +317,26 @@ impl Curator {
             info!("No reflection deltas generated");
             let stats_after = stats_before.clone();
             return Ok(self.build_summary(vec![], stats_before, stats_after));
+        }
+
+        // PREVENTIVE PRUNING: Check if we're at 80%+ capacity and prune BEFORE adding new bullets
+        // This implements the ACE "Grow-and-Refine" mechanism proactively
+        let current_total = stats_before.total_bullets;
+        let capacity_threshold = (self.config.max_total_bullets as f32 * 0.80) as usize;
+
+        if current_total >= capacity_threshold {
+            info!(
+                "Playbook at {}% capacity ({}/{}), running preventive pruning before adding {} new deltas",
+                (current_total as f32 / self.config.max_total_bullets as f32 * 100.0) as u32,
+                current_total,
+                self.config.max_total_bullets,
+                deltas.len()
+            );
+
+            let pruned = self.prune_playbook().await?;
+            if pruned > 0 {
+                info!("Preventive pruning removed {} bullets to make space for new learnings", pruned);
+            }
         }
 
         // Apply reflection deltas

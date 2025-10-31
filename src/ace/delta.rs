@@ -203,7 +203,7 @@ pub struct DeltaEngineConfig {
 impl Default for DeltaEngineConfig {
     fn default() -> Self {
         Self {
-            similarity_threshold: 0.90,
+            similarity_threshold: 0.85,  // Lowered from 0.90 to catch more near-duplicates
             min_content_length: 10,
             max_similarity_checks: 100,
         }

@@ -53,6 +53,53 @@ impl AccountManager {
         Self { pool }
     }
 
+    /// Initialize account with starting balance if account_balance table is empty
+    /// If account already exists, returns the current account without modification
+    pub async fn initialize_account_if_needed(&self, starting_balance: f64) -> Result<Account> {
+        // Check if account_balance table has any records
+        let count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM account_balance"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to check account_balance table")?
+        .unwrap_or(0);
+
+        if count == 0 {
+            // No account exists, create initial account
+            let account = sqlx::query_as!(
+                Account,
+                r#"
+                INSERT INTO account_balance (balance, equity, timestamp)
+                VALUES ($1, $2, $3)
+                RETURNING
+                    id,
+                    balance,
+                    equity,
+                    timestamp,
+                    daily_pnl,
+                    weekly_pnl,
+                    monthly_pnl,
+                    max_drawdown_pct,
+                    sharpe_ratio,
+                    win_rate,
+                    total_trades
+                "#,
+                starting_balance,
+                starting_balance, // equity = balance initially
+                Utc::now()
+            )
+            .fetch_one(&self.pool)
+            .await
+            .context("Failed to create initial account")?;
+
+            Ok(account)
+        } else {
+            // Account already exists, return current account
+            self.get_current_account().await
+        }
+    }
+
     /// Get current account state
     pub async fn get_current_account(&self) -> Result<Account> {
         let account = sqlx::query_as!(
@@ -77,16 +124,22 @@ impl AccountManager {
         )
         .fetch_one(&self.pool)
         .await
-        .context("Failed to fetch current account")?;
+        .with_context(|| {
+            "Failed to fetch current account. The account_balance table appears to be empty. \
+            Run `traderjoe positions` or ensure account is initialized with initialize_account_if_needed()."
+        })?;
 
         Ok(account)
     }
 
     /// Update account balance after a trade
+    /// IMPORTANT: Only actual executed paper trades affect account balance
+    /// Opportunity cost from STAY_FLAT decisions is never applied here
     pub async fn update_balance(&self, trade: &PaperTrade) -> Result<Account> {
         let current = self.get_current_account().await?;
 
-        // Update balance if trade is closed
+        // Update balance only if trade is closed with actual P&L
+        // STAY_FLAT opportunity costs are never applied to account balance
         let new_balance = if let Some(pnl) = trade.pnl {
             current.balance + pnl
         } else {
@@ -260,9 +313,9 @@ impl AccountManager {
         let initial_balance = sqlx::query_scalar!(
             "SELECT balance FROM account_balance ORDER BY timestamp ASC LIMIT 1"
         )
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(10000.0); // Fallback to default if no records exist
+        .fetch_one(&self.pool)
+        .await
+        .context("Account not initialized - cannot calculate performance stats. Call initialize_account_if_needed() first.")?;
 
         let total_return_pct = total_return / initial_balance;
         let daily_avg = total_return / days as f64;

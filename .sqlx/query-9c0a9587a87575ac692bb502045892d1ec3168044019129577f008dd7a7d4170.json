@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE trading_recommendations SET executed = true WHERE ace_context_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9c0a9587a87575ac692bb502045892d1ec3168044019129577f008dd7a7d4170"
+}

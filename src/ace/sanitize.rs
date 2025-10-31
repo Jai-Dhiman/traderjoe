@@ -164,42 +164,42 @@ pub fn validate_trading_decision(decision: &serde_json::Value) -> Result<(), Str
         return Err("reasoning cannot be empty".to_string());
     }
 
-    // NEW VALIDATION: Check for dismissive language about risk factors
-    let dismissive_phrases = [
-        "but not concerning",
-        "but not worrisome",
-        "not concerning due to",
-        "but we proceed anyway",
-        "but don't affect",
-        "doesn't affect the decision",
-        "noted but",
-        "acknowledged but",
-        "present but not significant",
+    // NEW VALIDATION: Check for overly dismissive language about risk factors
+    // At risk level 8-9/10, acknowledging risks while proceeding is acceptable
+    // Only flag complete dismissal or ignoring of risks
+    let overly_dismissive_phrases = [
+        "risks don't matter",
+        "ignoring the risks",
+        "risks are irrelevant",
+        "completely safe",
+        "no risks",
+        "zero risk",
     ];
 
     let reasoning_lower = reasoning.to_lowercase();
-    for phrase in &dismissive_phrases {
+    for phrase in &overly_dismissive_phrases {
         if reasoning_lower.contains(phrase) {
             return Err(format!(
-                "Decision dismisses risk factors with phrase '{}'. Risk factors MUST reduce confidence, not be dismissed.",
+                "Decision completely dismisses risk factors with phrase '{}'. Risks must be acknowledged even if proceeding.",
                 phrase
             ));
         }
     }
 
     // NEW VALIDATION: Check confidence vs risk factor count
-    // If multiple risk factors exist, confidence should be reduced accordingly
-    if risk_factors.len() >= 2 && confidence > 0.70 {
+    // Adjusted for risk level 8-9/10: more tolerant of risk factors
+    // At high risk tolerance, opportunities are weighted over risks
+    if risk_factors.len() >= 4 && confidence > 0.90 {
         return Err(format!(
-            "Confidence {:.2} is too high given {} risk factors. With 2+ risk factors, confidence should be <= 0.70",
+            "Confidence {:.2} is too high given {} risk factors. With 4+ risk factors, confidence should be <= 0.90",
             confidence,
             risk_factors.len()
         ));
     }
 
-    if risk_factors.len() >= 3 && confidence > 0.65 {
+    if risk_factors.len() >= 5 && confidence > 0.85 {
         return Err(format!(
-            "Confidence {:.2} is too high given {} risk factors. With 3+ risk factors, confidence should be <= 0.65 or consider STAY_FLAT",
+            "Confidence {:.2} is too high given {} risk factors. With 5+ risk factors, confidence should be <= 0.85 or consider STAY_FLAT",
             confidence,
             risk_factors.len()
         ));

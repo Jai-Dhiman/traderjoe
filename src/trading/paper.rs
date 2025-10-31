@@ -614,9 +614,12 @@ impl PaperTradingEngine {
                 }
             });
 
+            use crate::ace::reflector::OutcomeType;
             Ok(Some(crate::ace::reflector::TradingOutcome {
                 pnl_value,
                 pnl_pct,
+                opportunity_cost: None, // Paper trades are always executed, not hypothetical
+                outcome_type: OutcomeType::Executed,
                 mfe: trade.max_favorable_excursion,
                 mae: trade.max_adverse_excursion,
                 win,

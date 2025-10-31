@@ -169,6 +169,9 @@ impl BacktestOrchestrator {
         let account_mgr = AccountManager::new(self.pool.clone());
         let starting_capital = 10000.0; // Reset for backtest
 
+        // Initialize account if needed (only creates if account_balance is empty)
+        account_mgr.initialize_account_if_needed(starting_capital).await?;
+
         // Simulate each day
         for (day_num, current_date) in trading_days.iter().enumerate() {
             println!("📅 Day {}: {}", day_num + 1, current_date);
@@ -198,12 +201,23 @@ impl BacktestOrchestrator {
         }
 
         // Calculate final metrics
+        // IMPORTANT: Only count EXECUTED trades in statistics, not STAY_FLAT decisions
         let total_trades = day_results.iter().filter(|r| r.executed).count();
         let wins = day_results
             .iter()
-            .filter(|r| r.won.unwrap_or(false))
+            .filter(|r| r.executed && r.won.unwrap_or(false))
             .count();
-        let losses = total_trades - wins;
+        let losses = day_results
+            .iter()
+            .filter(|r| r.executed && !r.won.unwrap_or(true))
+            .count();
+
+        // Sanity check: wins + losses should equal total_trades
+        assert!(
+            wins + losses <= total_trades,
+            "BUG: wins ({}) + losses ({}) > total_trades ({}). Check STAY_FLAT handling!",
+            wins, losses, total_trades
+        );
 
         // Get final capital
         let final_account = account_mgr.get_current_account().await?;
@@ -267,33 +281,84 @@ impl BacktestOrchestrator {
             MorningOrchestrator::new(self.pool.clone(), morning_config).await?;
 
         // Run analysis for this historical date
-        let decision = morning_orchestrator
+        // Returns (TradingDecision, context_id)
+        let (decision, context_id) = morning_orchestrator
             .analyze_at_date(symbol, current_date)
             .await?;
 
         let confidence = decision.confidence;
         let action = &decision.action;
 
-        // Get the context_id that was just created by analyze_at_date
-        // We need to query the most recent context for this symbol
+        // Extract market regime from context to apply regime-based thresholds
+        // Load the full context to get market_state with regime information
         let context_dao = ContextDAO::new(self.pool.clone());
-        let recent_contexts = context_dao.get_recent_contexts(1).await?;
-        let context_id = recent_contexts
-            .first()
-            .map(|c| c.id)
-            .context("No context found after analysis")?;
+        let context = context_dao.get_context_by_id(context_id).await?
+            .context("Failed to load context for threshold check")?;
 
-        // Determine if we should execute a trade
+        let regime = context.market_state
+            .get("market_regime")
+            .and_then(|v| v.as_str())
+            .unwrap_or("VOLATILE"); // Default to VOLATILE if not specified
+
+        // Regime-based confidence thresholds
+        // Raised thresholds to ensure positive edge and 55%+ win rate
+        // Lower thresholds were causing trades on negative/marginal edge
+        let confidence_threshold = match regime {
+            "TRENDING" | "MOMENTUM" => 0.58,  // Increased from 0.38 - require strong confirmation
+            "RANGING" => 0.62,                 // Increased from 0.40 - ranging markets need higher confidence
+            "VOLATILE" => 0.68,                // Increased from 0.42 - high risk requires high confidence
+            _ => 0.60,                         // Increased from 0.40 - default conservative threshold
+        };
+
+        info!(
+            "Regime: {}, Threshold: {:.1}%, Confidence: {:.1}%",
+            regime, confidence_threshold * 100.0, confidence * 100.0
+        );
+
+        // Extract VIX for volatility-based filtering
+        let vix = context.market_state
+            .get("market_data")
+            .and_then(|d| d.get("vix"))
+            .and_then(|v| v.as_f64());
+
+        // Determine if we should execute a trade using regime-based threshold,
+        // VIX-based filtering, and fractional Kelly position sizing
         let should_execute = match action.as_str() {
             "STAY_FLAT" | "FLAT" => false,
-            _ if confidence < 0.50 => false,
-            _ => true,
+            _ if confidence < confidence_threshold => {
+                info!("Confidence {:.1}% below threshold {:.1}% for {} regime",
+                     confidence * 100.0, confidence_threshold * 100.0, regime);
+                false
+            },
+            // Filter CALL trades in high VIX environments (elevated risk)
+            "BUY_CALLS" if regime == "VOLATILE" && vix.map_or(false, |v| v > 25.0) => {
+                info!("Filtering CALL trade in VOLATILE regime with elevated VIX ({:.1})",
+                     vix.unwrap_or(0.0));
+                false
+            },
+            "BUY_CALLS" if vix.map_or(false, |v| v > 35.0) => {
+                info!("Filtering CALL trade in extreme VIX environment ({:.1})",
+                     vix.unwrap_or(0.0));
+                false
+            },
+            _ => true,  // Accept edge with fractional Kelly sizing
         };
 
         // EXECUTE TRADE (if applicable)
         if should_execute {
             info!("Executing paper trade for context {}", context_id);
             let _trade_id = self.execute_backtest_trade(context_id, current_date).await?;
+
+            // Mark the trading recommendation as executed
+            sqlx::query!(
+                "UPDATE trading_recommendations SET executed = true WHERE ace_context_id = $1",
+                context_id
+            )
+            .execute(&self.pool)
+            .await
+            .context("Failed to mark trading recommendation as executed")?;
+
+            info!("Marked recommendation as executed for context {}", context_id);
         } else {
             info!("Skipping trade execution: action={}, confidence={:.1}%", action, confidence * 100.0);
         }
@@ -346,7 +411,9 @@ impl BacktestOrchestrator {
             executed: should_execute,
             pnl: Some(review_result.outcome.pnl_value),
             pnl_pct: Some(review_result.outcome.pnl_pct),
-            won: Some(review_result.outcome.win),
+            // IMPORTANT: Only set won for EXECUTED trades
+            // STAY_FLAT decisions are not wins/losses, they're decision quality assessments
+            won: if should_execute { Some(review_result.outcome.win) } else { None },
             playbook_bullets_added: review_result.curation_summary.bullets_added,
             notes,
         })
@@ -529,16 +596,20 @@ impl BacktestOrchestrator {
         let mut current_capital = starting_capital;
 
         for result in results {
-            if let Some(pnl) = result.pnl {
-                current_capital += pnl;
+            // IMPORTANT: Only accumulate P&L from EXECUTED trades
+            // STAY_FLAT decisions should not affect capital calculations
+            if result.executed {
+                if let Some(pnl) = result.pnl {
+                    current_capital += pnl;
 
-                if current_capital > peak {
-                    peak = current_capital;
-                }
+                    if current_capital > peak {
+                        peak = current_capital;
+                    }
 
-                let drawdown = ((peak - current_capital) / peak) * 100.0;
-                if drawdown > max_drawdown {
-                    max_drawdown = drawdown;
+                    let drawdown = ((peak - current_capital) / peak) * 100.0;
+                    if drawdown > max_drawdown {
+                        max_drawdown = drawdown;
+                    }
                 }
             }
         }
@@ -548,8 +619,11 @@ impl BacktestOrchestrator {
 
     /// Calculate Sharpe ratio (annualized)
     fn calculate_sharpe_ratio(&self, results: &[DayResult]) -> f64 {
+        // IMPORTANT: Only use returns from EXECUTED trades
+        // STAY_FLAT decisions should not be included in performance metrics
         let returns: Vec<f64> = results
             .iter()
+            .filter(|r| r.executed)
             .filter_map(|r| r.pnl_pct)
             .collect();
 

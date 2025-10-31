@@ -15,7 +15,8 @@ pub async fn analyze(pool: PgPool, _date: Option<NaiveDate>, symbol: String) -> 
     let orchestrator = crate::orchestrator::MorningOrchestrator::new(pool, config).await?;
 
     // Run the full ACE analysis pipeline
-    let decision = orchestrator.analyze(&symbol).await?;
+    // Returns (TradingDecision, context_id)
+    let (decision, _context_id) = orchestrator.analyze(&symbol).await?;
 
     println!("\n✅ Morning analysis completed successfully!");
     println!(

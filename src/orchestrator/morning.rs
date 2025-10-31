@@ -6,6 +6,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::{
     ace::{
@@ -92,7 +93,8 @@ impl MorningOrchestrator {
     }
 
     /// Run full morning analysis for a symbol
-    pub async fn analyze(&self, symbol: &str) -> Result<TradingDecision> {
+    /// Returns (TradingDecision, context_id)
+    pub async fn analyze(&self, symbol: &str) -> Result<(TradingDecision, Uuid)> {
         info!("🌅 Starting morning analysis for {}", symbol);
 
         // Step 1: Fetch market data
@@ -212,7 +214,7 @@ impl MorningOrchestrator {
             .await;
 
         info!("✅ Morning analysis complete for {}", symbol);
-        Ok(decision)
+        Ok((decision, context_id))
     }
 
     /// Fetch and persist market data
@@ -329,19 +331,17 @@ impl MorningOrchestrator {
                 conf += 0.1; // Strong volume confirms move
             }
 
-            // Reduce confidence in high volatility
+            // Adjusted volatility penalty for higher risk tolerance
+            // High volatility can create opportunities, not just risks
             if volatility > 3.0 {
-                conf -= 0.15;
+                conf -= 0.08; // Reduced from -0.15 to allow volatility trades
             } else if volatility < 1.5 {
-                conf += 0.05; // Low volatility slightly positive
+                conf += 0.03; // Reduced from +0.05 to balance
             }
 
-            // RSI extremes
-            if rsi > 70.0 {
-                conf -= 0.05; // Slightly overbought
-            } else if rsi < 30.0 {
-                conf -= 0.05; // Slightly oversold
-            }
+            // RSI extremes - removed penalties, let LLM evaluate context
+            // Momentum can continue in trending markets
+            // (Previously: conf -= 0.05 for both overbought and oversold)
 
             conf.clamp(0.2, 0.95)
         };
@@ -1101,11 +1101,12 @@ impl MorningOrchestrator {
 
     /// Run analysis for a historical date (used in backtesting)
     /// This ensures temporal isolation - only data UP TO the date is used
+    /// Returns (TradingDecision, context_id)
     pub async fn analyze_at_date(
         &self,
         symbol: &str,
         historical_date: chrono::NaiveDate,
-    ) -> Result<TradingDecision> {
+    ) -> Result<(TradingDecision, Uuid)> {
         info!(
             "🌅 Starting historical analysis for {} on {}",
             symbol, historical_date

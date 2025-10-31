@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tracing::{info, warn};
 
+use crate::trading::PlattScaler;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradePerformance {
     pub trade_id: uuid::Uuid,
@@ -30,11 +32,26 @@ pub struct PerformanceStats {
 
 pub struct PerformanceTracker {
     pool: PgPool,
+    scaler: PlattScaler,
 }
 
 impl PerformanceTracker {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            scaler: PlattScaler::new(),
+        }
+    }
+
+    /// Update Platt scaler with new trade outcome
+    pub fn record_trade_outcome(&mut self, confidence: f64, won: bool) {
+        self.scaler.record(confidence, won);
+        self.scaler.fit(); // Refit after each new trade
+    }
+
+    /// Get current calibration report
+    pub fn get_calibration_report(&self) -> String {
+        self.scaler.calibration_report()
     }
 
     /// Get recent trade performance (last N closed trades)
@@ -129,86 +146,42 @@ impl PerformanceTracker {
         }
     }
 
-    /// Calibrate confidence based on recent performance
+    /// Calibrate confidence using Platt scaling
     ///
-    /// Adjusts raw LLM confidence using recent win rate and consecutive losses
-    /// to prevent overconfidence after repeated failures
+    /// Maps raw LLM confidence to calibrated probability based on historical accuracy
     pub fn calibrate_confidence(
         &self,
         raw_confidence: f32,
         stats: &PerformanceStats,
     ) -> (f32, String) {
-        // Start with raw confidence
-        let mut calibrated = raw_confidence;
-        let mut adjustments = Vec::new();
+        // Use Platt scaling for professional calibration
+        let calibrated = self.scaler.calibrate(raw_confidence as f64) as f32;
 
-        // If we have insufficient trade history, don't calibrate
-        if stats.total_trades < 3 {
-            return (
-                calibrated,
-                "Insufficient trade history for calibration (need 3+ trades)".to_string(),
-            );
-        }
-
-        // 1. Apply consecutive loss penalty
-        // Each consecutive loss reduces confidence by 5%, min 30%
-        if stats.consecutive_losses > 0 {
-            let loss_penalty = (stats.consecutive_losses as f32) * 0.05;
-            calibrated = (calibrated - loss_penalty).max(0.3);
-            adjustments.push(format!(
-                "consecutive_losses:{} (-{:.1}%)",
-                stats.consecutive_losses,
-                loss_penalty * 100.0
-            ));
-        }
-
-        // 2. Apply win rate calibration
-        // If recent win rate is significantly below confidence, reduce confidence
-        if stats.total_trades >= 5 {
-            let confidence_error = raw_confidence - stats.win_rate;
-            if confidence_error > 0.15 {
-                // Overconfident by more than 15%
-                let error_penalty = confidence_error * 0.3; // Reduce by 30% of error
-                calibrated = (calibrated - error_penalty).max(0.3);
-                adjustments.push(format!(
-                    "win_rate:{:.1}% vs conf:{:.1}% (-{:.1}%)",
-                    stats.win_rate * 100.0,
-                    raw_confidence * 100.0,
-                    error_penalty * 100.0
-                ));
-            }
-        }
-
-        // 3. Cap confidence at 60% after 3+ consecutive losses
-        if stats.consecutive_losses >= 3 {
-            if calibrated > 0.6 {
-                calibrated = 0.6;
-                adjustments.push("max_cap:60% (3+ losses)".to_string());
-            }
-        }
-
-        // 4. Gradual recovery with wins
-        // After consecutive wins, allow confidence to increase slightly
-        if stats.consecutive_wins >= 2 && stats.total_trades >= 5 {
-            let recovery_boost = (stats.consecutive_wins as f32 * 0.03).min(0.1);
-            calibrated = (calibrated + recovery_boost).min(0.95);
-            adjustments.push(format!(
-                "win_recovery:+{:.1}% ({} wins)",
-                recovery_boost * 100.0,
-                stats.consecutive_wins
-            ));
-        }
-
-        // Ensure confidence stays within valid bounds
-        calibrated = calibrated.clamp(0.3, 0.95);
-
-        let adjustment_summary = if adjustments.is_empty() {
-            "No adjustments needed".to_string()
+        let adjustment_summary = if stats.total_trades < 30 {
+            format!("Platt scaling (identity - only {} samples)", stats.total_trades)
         } else {
-            adjustments.join(", ")
+            let brier = self.scaler.brier_score()
+                .map(|b| format!("Brier: {:.4}", b))
+                .unwrap_or_else(|| "Brier: N/A".to_string());
+            format!("Platt scaled | {} | {} samples", brier, stats.total_trades)
         };
 
-        (calibrated, adjustment_summary)
+        // Add safety checks for consecutive losses
+        // Increased cap to 75% (from 60%) for higher risk tolerance
+        let final_calibrated = if stats.consecutive_losses >= 3 {
+            // Cap at 75% after 3+ consecutive losses for safety
+            calibrated.min(0.75)
+        } else {
+            calibrated
+        };
+
+        let full_summary = if final_calibrated < calibrated {
+            format!("{} | capped at 75% ({}L streak)", adjustment_summary, stats.consecutive_losses)
+        } else {
+            adjustment_summary
+        };
+
+        (final_calibrated, full_summary)
     }
 
     /// Get calibrated confidence for decision making
@@ -272,11 +245,12 @@ mod tests {
         // Note: This won't have a valid connection, but calibrate_confidence doesn't need it
         PerformanceTracker {
             pool: unsafe { std::mem::zeroed() }, // Dummy pool for testing
+            scaler: PlattScaler::new(),
         }
     }
 
     #[test]
-    fn test_consecutive_loss_penalty() {
+    fn test_consecutive_loss_cap() {
         let tracker = create_dummy_tracker();
 
         let stats = PerformanceStats {
@@ -291,36 +265,13 @@ mod tests {
 
         let (calibrated, summary) = tracker.calibrate_confidence(0.85, &stats);
 
-        // Should apply 4 * 0.05 = 0.20 penalty: 0.85 - 0.20 = 0.65
-        // But then capped at 0.60 for 3+ consecutive losses
+        // Should be capped at 0.60 for 3+ consecutive losses
         assert_eq!(calibrated, 0.6);
-        assert!(summary.contains("consecutive_losses"));
+        assert!(summary.contains("capped"));
     }
 
     #[test]
-    fn test_win_rate_calibration() {
-        let tracker = create_dummy_tracker();
-
-        let stats = PerformanceStats {
-            total_trades: 10,
-            wins: 3,
-            losses: 7,
-            win_rate: 0.3,
-            consecutive_losses: 1,
-            consecutive_wins: 0,
-            avg_confidence: 0.8,
-        };
-
-        let (calibrated, summary) = tracker.calibrate_confidence(0.8, &stats);
-
-        // Confidence 0.8 vs win rate 0.3 = 0.5 error (> 0.15)
-        // Should apply error penalty
-        assert!(calibrated < 0.8);
-        assert!(summary.contains("win_rate"));
-    }
-
-    #[test]
-    fn test_recovery_boost() {
+    fn test_platt_scaling_identity_with_few_samples() {
         let tracker = create_dummy_tracker();
 
         let stats = PerformanceStats {
@@ -329,35 +280,27 @@ mod tests {
             losses: 5,
             win_rate: 0.5,
             consecutive_losses: 0,
-            consecutive_wins: 3,
+            consecutive_wins: 0,
             avg_confidence: 0.6,
         };
 
-        let (calibrated, summary) = tracker.calibrate_confidence(0.6, &stats);
+        let (calibrated, summary) = tracker.calibrate_confidence(0.7, &stats);
 
-        // Should apply recovery boost for 3 consecutive wins
-        assert!(calibrated > 0.6);
-        assert!(summary.contains("win_recovery"));
+        // With < 30 samples, Platt scaling uses identity mapping
+        assert_eq!(calibrated, 0.7);
+        assert!(summary.contains("identity"));
     }
 
     #[test]
-    fn test_insufficient_history() {
-        let tracker = create_dummy_tracker();
+    fn test_record_trade_outcome() {
+        let mut tracker = create_dummy_tracker();
 
-        let stats = PerformanceStats {
-            total_trades: 2,
-            wins: 1,
-            losses: 1,
-            win_rate: 0.5,
-            consecutive_losses: 0,
-            consecutive_wins: 1,
-            avg_confidence: 0.7,
-        };
+        // Record some trades
+        tracker.record_trade_outcome(0.7, true);
+        tracker.record_trade_outcome(0.6, false);
+        tracker.record_trade_outcome(0.8, true);
 
-        let (calibrated, summary) = tracker.calibrate_confidence(0.75, &stats);
-
-        // Should not calibrate with insufficient history
-        assert_eq!(calibrated, 0.75);
-        assert!(summary.contains("Insufficient"));
+        // Scaler should have recorded 3 trades
+        assert_eq!(tracker.scaler.total_samples(), 3);
     }
 }

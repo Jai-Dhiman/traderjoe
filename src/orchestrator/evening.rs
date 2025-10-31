@@ -184,12 +184,23 @@ impl EveningOrchestrator {
         info!("📊 Computing trading outcome...");
         let outcome = self.compute_outcome(&context, &decision).await?;
 
-        info!(
-            "Outcome: {} with P&L ${:.2} ({:+.2}%)",
-            if outcome.win { "WIN" } else { "LOSS" },
-            outcome.pnl_value,
-            outcome.pnl_pct
-        );
+        // Log outcome with type distinction
+        if outcome.is_hypothetical() {
+            info!(
+                "Outcome: {} (Hypothetical - STAY_FLAT) | Decision Quality: {} | Opportunity Cost: ${:.2} | Price Move: {:+.2}%",
+                if outcome.win { "CORRECT" } else { "SUBOPTIMAL" },
+                if outcome.win { "GOOD" } else { "MISSED OPPORTUNITY" },
+                outcome.opportunity_cost.unwrap_or(0.0),
+                outcome.pnl_pct
+            );
+        } else {
+            info!(
+                "Outcome: {} (Executed Trade) | P&L: ${:.2} ({:+.2}%) | Account Impact: YES",
+                if outcome.win { "WIN" } else { "LOSS" },
+                outcome.pnl_value,
+                outcome.pnl_pct
+            );
+        }
 
         // Step 4: Run reflection and update playbook
         info!("🧠 Running ACE reflection...");
@@ -342,6 +353,11 @@ impl EveningOrchestrator {
                 .get("position_size_multiplier")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(1.0) as f32,
+            confidence_breakdown: decision
+                .get("confidence_breakdown")
+                .and_then(|v| {
+                    serde_json::from_value(v.clone()).ok()
+                }),
         })
     }
 
@@ -424,14 +440,23 @@ impl EveningOrchestrator {
         let (pnl_value, pnl_pct, win, notes) = match decision.action.as_str() {
             "BUY_CALLS" | "BULLISH" => {
                 // Calculate option prices using Black-Scholes
-                // Use 30-delta call (typical for 0-1 DTE strategies)
+                // Use 40-delta call (more conservative than 30-delta, better win rate)
+                // 40-delta = ~60% probability of profit vs 30-delta = ~70% OTM
                 let strike = black_scholes::strike_from_delta(
                     entry_price,
-                    0.30,
+                    0.40,
                     annualized_vol,
                     entry_time_to_expiry,
                     true,
                 );
+
+                // Apply theta acceleration for 0-1 DTE options (exponential decay)
+                // 0-1 DTE options lose value much faster than Black-Scholes predicts
+                let theta_adjustment = if entry_time_to_expiry < 2.0 / 365.0 {
+                    0.88  // 12% additional decay for sub-2-day options
+                } else {
+                    1.0
+                };
 
                 let entry_option_price = black_scholes::call_price(
                     entry_price,
@@ -439,7 +464,7 @@ impl EveningOrchestrator {
                     risk_free_rate,
                     annualized_vol,
                     entry_time_to_expiry,
-                );
+                ) * theta_adjustment;
 
                 let exit_option_price = black_scholes::call_price(
                     exit_price,
@@ -447,7 +472,7 @@ impl EveningOrchestrator {
                     risk_free_rate,
                     annualized_vol,
                     exit_time_to_expiry,
-                );
+                ) * theta_adjustment;
 
                 // Calculate P&L based on option price movement
                 // Assume 10 contracts * 100 shares/contract = 1000 shares equivalent
@@ -466,14 +491,23 @@ impl EveningOrchestrator {
             }
             "BUY_PUTS" | "BEARISH" => {
                 // Calculate put option prices using Black-Scholes
-                // Use 30-delta put (typical for 0-1 DTE strategies)
+                // Use 40-delta put (more conservative than 30-delta, better win rate)
+                // 40-delta = ~60% probability of profit vs 30-delta = ~70% OTM
                 let strike = black_scholes::strike_from_delta(
                     entry_price,
-                    -0.30,
+                    -0.40,
                     annualized_vol,
                     entry_time_to_expiry,
                     false,
                 );
+
+                // Apply theta acceleration for 0-1 DTE options (exponential decay)
+                // 0-1 DTE options lose value much faster than Black-Scholes predicts
+                let theta_adjustment = if entry_time_to_expiry < 2.0 / 365.0 {
+                    0.88  // 12% additional decay for sub-2-day options
+                } else {
+                    1.0
+                };
 
                 let entry_option_price = black_scholes::put_price(
                     entry_price,
@@ -481,7 +515,7 @@ impl EveningOrchestrator {
                     risk_free_rate,
                     annualized_vol,
                     entry_time_to_expiry,
-                );
+                ) * theta_adjustment;
 
                 let exit_option_price = black_scholes::put_price(
                     exit_price,
@@ -489,7 +523,7 @@ impl EveningOrchestrator {
                     risk_free_rate,
                     annualized_vol,
                     exit_time_to_expiry,
-                );
+                ) * theta_adjustment;
 
                 // Calculate P&L
                 let contracts = 10.0;
@@ -506,16 +540,42 @@ impl EveningOrchestrator {
                 (total_pnl, pnl_pct, win, Some(notes_text))
             }
             "STAY_FLAT" | "FLAT" => {
-                // Calculate opportunity cost of not trading
+                // Calculate opportunity cost of not trading for learning/reflection purposes only
+                // IMPORTANT: This opportunity cost is NEVER applied to the account balance
+                // Account balance only changes on actual executed trades
                 let price_move_pct = ((exit_price - entry_price) / entry_price) * 100.0;
                 let abs_move = price_move_pct.abs();
 
+                // Extract decision context for evaluating if STAY_FLAT was correct
+                let confidence = context.confidence.unwrap_or(0.0);
+                let regime = context.market_state
+                    .get("market_regime")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("UNKNOWN");
+                let vix = context.market_state
+                    .get("market_data")
+                    .and_then(|d| d.get("vix"))
+                    .and_then(|v| v.as_f64());
+
                 // Evaluate if staying flat was the correct decision
+                // Consider: confidence level, market regime, VIX, and price movement
                 let (opportunity_cost, was_correct, reason) = if abs_move < 0.5 {
                     // Market barely moved - staying flat was correct
                     (0.0, true, format!(
                         "STAY_FLAT was correct: Market moved only {:+.2}% (< 0.5% threshold). No significant opportunity missed.",
                         price_move_pct
+                    ))
+                } else if confidence < 0.55 {
+                    // Low confidence - staying flat was prudent risk management
+                    (0.0, true, format!(
+                        "STAY_FLAT was correct: Low confidence ({:.1}%) warranted risk avoidance despite {:+.2}% move.",
+                        confidence * 100.0, price_move_pct
+                    ))
+                } else if regime == "VOLATILE" && vix.map_or(false, |v| v > 25.0) {
+                    // High VIX environment - staying flat was prudent
+                    (0.0, true, format!(
+                        "STAY_FLAT was correct: Elevated VIX ({:.1}) in {} regime warranted caution despite {:+.2}% move.",
+                        vix.unwrap_or(0.0), regime, price_move_pct
                     ))
                 } else {
                     // Market moved significantly - calculate missed opportunity using Black-Scholes
@@ -524,7 +584,7 @@ impl EveningOrchestrator {
                         // Price went up - we should have bought calls
                         let strike = black_scholes::strike_from_delta(
                             entry_price,
-                            0.30,
+                            0.40,  // 40-delta for better probability
                             annualized_vol,
                             entry_time_to_expiry,
                             true,
@@ -534,7 +594,7 @@ impl EveningOrchestrator {
                         // Price went down - we should have bought puts
                         let strike = black_scholes::strike_from_delta(
                             entry_price,
-                            -0.30,
+                            -0.40,  // 40-delta for better probability
                             annualized_vol,
                             entry_time_to_expiry,
                             false,
@@ -592,17 +652,58 @@ impl EveningOrchestrator {
             (None, None)
         };
 
-        Ok(TradingOutcome {
-            pnl_value,
-            pnl_pct,
-            mfe,
-            mae,
-            win,
-            entry_price,
-            exit_price,
-            duration_hours,
-            notes,
-        })
+        // Construct outcome based on action type
+        let outcome = if decision.action == "STAY_FLAT" || decision.action == "FLAT" {
+            // STAY_FLAT: Use hypothetical outcome with opportunity cost
+            let stay_flat_outcome = TradingOutcome::from_stay_flat(
+                entry_price,
+                exit_price,
+                pnl_value, // This is actually opportunity_cost from the match above
+                pnl_pct,   // This is price_move_pct
+                win,       // This is was_correct
+                duration_hours,
+            )
+            .with_notes(notes.unwrap_or_default());
+
+            // SAFETY: Verify STAY_FLAT outcomes never affect balance
+            assert!(
+                !stay_flat_outcome.should_affect_balance(),
+                "BUG: STAY_FLAT outcome attempting to affect account balance! This will corrupt statistics."
+            );
+            assert_eq!(
+                stay_flat_outcome.pnl_value, 0.0,
+                "BUG: STAY_FLAT outcome has non-zero pnl_value: {}. Must be 0.0.",
+                stay_flat_outcome.pnl_value
+            );
+
+            stay_flat_outcome
+        } else {
+            // Executed trade: Use manual construction with Executed type
+            use crate::ace::reflector::OutcomeType;
+            let executed_outcome = TradingOutcome {
+                pnl_value,
+                pnl_pct,
+                opportunity_cost: None,
+                outcome_type: OutcomeType::Executed,
+                mfe,
+                mae,
+                win,
+                entry_price,
+                exit_price,
+                duration_hours,
+                notes,
+            };
+
+            // SAFETY: Verify executed trades should affect balance
+            assert!(
+                executed_outcome.should_affect_balance(),
+                "BUG: Executed trade outcome not marked as affecting balance!"
+            );
+
+            executed_outcome
+        };
+
+        Ok(outcome)
     }
 
     /// Close any open trades associated with this context (for backtest mode)

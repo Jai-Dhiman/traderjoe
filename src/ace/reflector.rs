@@ -16,18 +16,34 @@ use crate::{
     llm::LLMClient,
 };
 
+/// Type of trading outcome - distinguishes actual trades from hypothetical scenarios
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutcomeType {
+    /// Actual executed trade that affected account balance
+    Executed,
+    /// Hypothetical outcome (e.g., STAY_FLAT with opportunity cost)
+    Hypothetical,
+}
+
 /// Trading outcome data for reflection
 #[derive(Debug, Clone)]
 pub struct TradingOutcome {
-    /// Profit/loss in dollars
+    /// Actual profit/loss in dollars (0.0 for STAY_FLAT/hypothetical)
+    /// This value affects account balance and statistics ONLY for OutcomeType::Executed
     pub pnl_value: f64,
     /// Profit/loss as percentage
     pub pnl_pct: f64,
+    /// Opportunity cost for STAY_FLAT decisions (for learning only, never affects balance)
+    /// Negative value = missed profitable opportunity
+    /// Positive/zero = staying flat was correct
+    pub opportunity_cost: Option<f64>,
+    /// Type of outcome - executed trade or hypothetical
+    pub outcome_type: OutcomeType,
     /// Maximum favorable excursion (best unrealized profit)
     pub mfe: Option<f64>,
     /// Maximum adverse excursion (worst unrealized loss)
     pub mae: Option<f64>,
-    /// Whether the trade was ultimately profitable
+    /// Whether the trade was ultimately profitable (for executed) or decision was correct (for hypothetical)
     pub win: bool,
     /// Entry price
     pub entry_price: f64,
@@ -40,7 +56,7 @@ pub struct TradingOutcome {
 }
 
 impl TradingOutcome {
-    /// Create outcome from basic P&L data
+    /// Create outcome from basic P&L data for executed trades
     pub fn from_pnl(
         entry_price: f64,
         exit_price: f64,
@@ -56,6 +72,8 @@ impl TradingOutcome {
         Self {
             pnl_value,
             pnl_pct,
+            opportunity_cost: None,
+            outcome_type: OutcomeType::Executed,
             mfe: None,
             mae: None,
             win: pnl_value > 0.0,
@@ -64,6 +82,40 @@ impl TradingOutcome {
             duration_hours,
             notes: None,
         }
+    }
+
+    /// Create hypothetical outcome for STAY_FLAT decisions
+    pub fn from_stay_flat(
+        entry_price: f64,
+        exit_price: f64,
+        opportunity_cost: f64,
+        price_move_pct: f64,
+        was_correct: bool,
+        duration_hours: f64,
+    ) -> Self {
+        Self {
+            pnl_value: 0.0, // STAY_FLAT never affects actual balance
+            pnl_pct: price_move_pct,
+            opportunity_cost: Some(opportunity_cost),
+            outcome_type: OutcomeType::Hypothetical,
+            mfe: None,
+            mae: None,
+            win: was_correct,
+            entry_price,
+            exit_price,
+            duration_hours,
+            notes: None,
+        }
+    }
+
+    /// Check if this outcome should affect account balance
+    pub fn should_affect_balance(&self) -> bool {
+        matches!(self.outcome_type, OutcomeType::Executed)
+    }
+
+    /// Check if this is a hypothetical/STAY_FLAT outcome
+    pub fn is_hypothetical(&self) -> bool {
+        matches!(self.outcome_type, OutcomeType::Hypothetical)
     }
 
     /// Add MFE/MAE data
@@ -81,19 +133,26 @@ impl TradingOutcome {
 
     /// Get outcome severity for confidence adjustments
     pub fn outcome_severity(&self) -> f32 {
-        // Scale severity based on P&L percentage
-        let abs_pnl = self.pnl_pct.abs();
-
-        // Special handling for STAY_FLAT decisions (0% P&L)
-        // These decisions need meaningful confidence updates even with no P&L
-        if abs_pnl < 0.01 {
-            // For flat trades, use fixed moderate severity
-            // This ensures playbook bullets get meaningful updates
-            // Without this, 0% P&L would result in tiny 0.01 adjustments
-            return 0.05; // 5% confidence adjustment per vote
+        // Special handling for STAY_FLAT/hypothetical decisions
+        // Use opportunity cost magnitude if available for learning signal strength
+        if self.is_hypothetical() {
+            if let Some(opp_cost) = self.opportunity_cost {
+                let abs_cost = opp_cost.abs();
+                // Scale by opportunity cost magnitude
+                return match abs_cost {
+                    x if x > 5000.0 => 0.15, // Large missed opportunity
+                    x if x > 2000.0 => 0.10, // Medium missed opportunity
+                    x if x > 500.0 => 0.05,  // Small missed opportunity
+                    _ => 0.02,               // Minimal opportunity cost
+                };
+            } else {
+                // No opportunity cost calculated, use fixed moderate severity
+                return 0.05;
+            }
         }
 
-        // For actual trades, scale by P&L magnitude
+        // For actual executed trades, scale by P&L magnitude
+        let abs_pnl = self.pnl_pct.abs();
         match abs_pnl {
             x if x > 50.0 => 0.15, // Large moves (50%+)
             x if x > 20.0 => 0.10, // Medium moves (20-50%)
@@ -157,6 +216,8 @@ impl Reflector {
         let outcome_json = json!({
             "pnl_value": input.outcome.pnl_value,
             "pnl_pct": input.outcome.pnl_pct,
+            "opportunity_cost": input.outcome.opportunity_cost,
+            "outcome_type": if input.outcome.is_hypothetical() { "Hypothetical" } else { "Executed" },
             "win": input.outcome.win,
             "entry_price": input.outcome.entry_price,
             "exit_price": input.outcome.exit_price,
@@ -275,8 +336,27 @@ impl Reflector {
     ) -> Result<Vec<Delta>> {
         let mut deltas = Vec::new();
 
-        // Add lessons learned as new bullets
-        for lesson in reflection.lessons_learned {
+        // HARD CAP: Enforce maximum total items from LLM reflection
+        const MAX_TOTAL_ITEMS: usize = 5;
+        let total_items = reflection.lessons_learned.len()
+            + reflection.what_worked.len()
+            + reflection.what_failed.len()
+            + reflection.playbook_updates.len();
+
+        if total_items > MAX_TOTAL_ITEMS {
+            warn!(
+                "LLM reflection generated {} items (lessons={}, worked={}, failed={}, updates={}), exceeds limit of {}. Truncating to most impactful items.",
+                total_items,
+                reflection.lessons_learned.len(),
+                reflection.what_worked.len(),
+                reflection.what_failed.len(),
+                reflection.playbook_updates.len(),
+                MAX_TOTAL_ITEMS
+            );
+        }
+
+        // Add lessons learned as new bullets (prioritize these)
+        for lesson in reflection.lessons_learned.iter().take(2) {
             let meta = json!({
                 "context_id": input.context_id,
                 "outcome_win": input.outcome.win,
@@ -287,13 +367,13 @@ impl Reflector {
 
             deltas.push(Delta::add(
                 PlaybookSection::PatternInsights,
-                lesson,
+                lesson.clone(),
                 Some(meta),
             ));
         }
 
-        // Add what worked as reinforcement
-        for success in reflection.what_worked {
+        // Add what worked as reinforcement (limit to 1)
+        for success in reflection.what_worked.iter().take(1) {
             let meta = json!({
                 "context_id": input.context_id,
                 "outcome_win": input.outcome.win,
@@ -303,13 +383,13 @@ impl Reflector {
 
             deltas.push(Delta::add(
                 PlaybookSection::PatternInsights,
-                success,
+                success.clone(),
                 Some(meta),
             ));
         }
 
-        // Add what failed as warnings
-        for failure in reflection.what_failed {
+        // Add what failed as warnings (limit to 1)
+        for failure in reflection.what_failed.iter().take(1) {
             let meta = json!({
                 "context_id": input.context_id,
                 "outcome_win": input.outcome.win,
@@ -319,13 +399,13 @@ impl Reflector {
 
             deltas.push(Delta::add(
                 PlaybookSection::FailureModes,
-                failure,
+                failure.clone(),
                 Some(meta),
             ));
         }
 
-        // Add playbook updates
-        for update in reflection.playbook_updates {
+        // Add playbook updates (limit to 1)
+        for update in reflection.playbook_updates.iter().take(1) {
             let meta = json!({
                 "context_id": input.context_id,
                 "reflection_type": "playbook_update",
@@ -335,14 +415,18 @@ impl Reflector {
             // Try to determine appropriate section from content
             let section = self.infer_section_from_content(&update);
 
-            deltas.push(Delta::add(section, update, Some(meta)));
+            deltas.push(Delta::add(section, update.clone(), Some(meta)));
         }
 
-        // Update confidence for referenced bullets
+        // HARD CAP: Ensure we never exceed 10 total deltas per reflection
+        const MAX_DELTAS_PER_DAY: usize = 10;
+
+        // Update confidence for referenced bullets (but enforce total cap)
         let base_confidence_adjustment =
             reflection.confidence_adjustment * input.outcome.outcome_severity();
 
-        for bullet in &input.referenced_bullets {
+        let remaining_capacity = MAX_DELTAS_PER_DAY.saturating_sub(deltas.len());
+        for bullet in input.referenced_bullets.iter().take(remaining_capacity) {
             let helpful_delta = if input.outcome.win { 1 } else { 0 };
             let harmful_delta = if !input.outcome.win { 1 } else { 0 };
 
@@ -363,6 +447,25 @@ impl Reflector {
                 Some(meta),
             ));
         }
+
+        if deltas.len() > MAX_DELTAS_PER_DAY {
+            warn!(
+                "Reflection generated {} deltas, truncating to {} (ACE design limit)",
+                deltas.len(),
+                MAX_DELTAS_PER_DAY
+            );
+            deltas.truncate(MAX_DELTAS_PER_DAY);
+        }
+
+        info!(
+            "Reflection produced {} deltas (lessons={}, worked={}, failed={}, updates={}, bullet_updates={})",
+            deltas.len(),
+            reflection.lessons_learned.len().min(2),
+            reflection.what_worked.len().min(1),
+            reflection.what_failed.len().min(1),
+            reflection.playbook_updates.len().min(1),
+            input.referenced_bullets.len().min(remaining_capacity)
+        );
 
         Ok(deltas)
     }
@@ -469,6 +572,10 @@ mod tests {
 
         assert_eq!(outcome.pnl_value, 50.0);
         assert_eq!(outcome.pnl_pct, 5.0);
+        assert_eq!(outcome.opportunity_cost, None);
+        assert_eq!(outcome.outcome_type, OutcomeType::Executed);
+        assert!(outcome.should_affect_balance());
+        assert!(!outcome.is_hypothetical());
         assert!(outcome.win);
         assert_eq!(outcome.entry_price, 100.0);
         assert_eq!(outcome.exit_price, 105.0);
@@ -478,24 +585,72 @@ mod tests {
     }
 
     #[test]
-    fn test_outcome_severity() {
-        // STAY_FLAT decision (0% P&L) - critical for playbook learning
-        let stay_flat = TradingOutcome::from_pnl(100.0, 100.0, 0.0, 0.0);
-        assert_eq!(stay_flat.outcome_severity(), 0.05); // Fixed 5% for STAY_FLAT
+    fn test_stay_flat_outcome() {
+        // STAY_FLAT with small market move (correct decision)
+        let stay_flat_correct = TradingOutcome::from_stay_flat(
+            100.0,
+            100.2,
+            0.0,
+            0.2,
+            true,
+            6.5,
+        ).with_notes("Market barely moved, staying flat was correct".to_string());
 
-        // Small moves (< 5%)
+        assert_eq!(stay_flat_correct.pnl_value, 0.0);
+        assert_eq!(stay_flat_correct.pnl_pct, 0.2);
+        assert_eq!(stay_flat_correct.opportunity_cost, Some(0.0));
+        assert_eq!(stay_flat_correct.outcome_type, OutcomeType::Hypothetical);
+        assert!(!stay_flat_correct.should_affect_balance());
+        assert!(stay_flat_correct.is_hypothetical());
+        assert!(stay_flat_correct.win); // Was correct decision
+
+        // STAY_FLAT with large market move (missed opportunity)
+        let stay_flat_miss = TradingOutcome::from_stay_flat(
+            100.0,
+            105.0,
+            -2500.0, // Negative = missed profit
+            5.0,
+            false,
+            6.5,
+        );
+
+        assert_eq!(stay_flat_miss.pnl_value, 0.0);
+        assert_eq!(stay_flat_miss.opportunity_cost, Some(-2500.0));
+        assert!(!stay_flat_miss.should_affect_balance());
+        assert!(!stay_flat_miss.win); // Was incorrect decision
+    }
+
+    #[test]
+    fn test_outcome_severity() {
+        // STAY_FLAT with small opportunity cost
+        let stay_flat_small = TradingOutcome::from_stay_flat(100.0, 100.5, -200.0, 0.5, false, 6.5);
+        assert_eq!(stay_flat_small.outcome_severity(), 0.02); // < $500 opp cost
+
+        // STAY_FLAT with medium opportunity cost
+        let stay_flat_medium = TradingOutcome::from_stay_flat(100.0, 105.0, -1500.0, 5.0, false, 6.5);
+        assert_eq!(stay_flat_medium.outcome_severity(), 0.05); // $500-2000 opp cost
+
+        // STAY_FLAT with large opportunity cost
+        let stay_flat_large = TradingOutcome::from_stay_flat(100.0, 110.0, -6000.0, 10.0, false, 6.5);
+        assert_eq!(stay_flat_large.outcome_severity(), 0.15); // > $5000 opp cost
+
+        // STAY_FLAT correct (no opp cost)
+        let stay_flat_correct = TradingOutcome::from_stay_flat(100.0, 100.2, 0.0, 0.2, true, 6.5);
+        assert_eq!(stay_flat_correct.outcome_severity(), 0.02); // Minimal opp cost
+
+        // Executed trade: Small moves (< 5%)
         let small_win = TradingOutcome::from_pnl(100.0, 102.0, 20.0, 1.0);
         assert_eq!(small_win.outcome_severity(), 0.02); // 2% gain
 
-        // Medium moves (5-20%)
+        // Executed trade: Medium moves (5-20%)
         let medium_loss = TradingOutcome::from_pnl(100.0, 85.0, -150.0, 3.0);
         assert_eq!(medium_loss.outcome_severity(), 0.05); // 15% loss
 
-        // Large moves (20-50%)
+        // Executed trade: Large moves (20-50%)
         let large_loss = TradingOutcome::from_pnl(100.0, 75.0, -250.0, 3.0);
         assert_eq!(large_loss.outcome_severity(), 0.10); // 25% loss
 
-        // Very large moves (50%+)
+        // Executed trade: Very large moves (50%+)
         let very_large_win = TradingOutcome::from_pnl(100.0, 160.0, 600.0, 4.0);
         assert_eq!(very_large_win.outcome_severity(), 0.15); // 60% gain
     }
