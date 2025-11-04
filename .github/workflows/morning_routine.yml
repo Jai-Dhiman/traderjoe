@@ -1,246 +1,250 @@
-name: Morning Trading Routine
+# WORKFLOW TEMPORARILY DISABLED TO SAVE CREDITS
+# Uncomment below to re-enable this workflow
 
-on:
-  schedule:
-    # Run at 9:45 AM ET on weekdays only (after market open at 9:30 AM ET)
-    # ET is UTC-5 (EST) or UTC-4 (EDT), using 14:45 UTC to work year-round
-    - cron: "45 14 * * 1-5"
-  workflow_dispatch: # Allow manual trigger for testing
-
-env:
-  RUST_BACKTRACE: 1
-  RUST_LOG: traderjoe=info,sqlx=warn
-  LLM_PROVIDER: workers_ai
-  PRIMARY_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-  FALLBACK_MODEL: "@cf/meta/llama-3.1-8b-instruct"
-
-jobs:
-  morning_analysis:
-    runs-on: ubuntu-latest
-    # Only run on weekdays during market hours
-    if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Check if Market is Open
-        id: market_check
-        run: |
-          # Get current day of week (1=Monday, ..., 7=Sunday)
-          DOW=$(date -u +%u)
-
-          # Get current hour in ET using America/New_York timezone
-          HOUR_ET=$(TZ=America/New_York date +%H)
-          MINUTE_ET=$(TZ=America/New_York date +%M)
-
-          # Get current date for logging
-          DATE_ET=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S %Z')
-          echo "Current time: $DATE_ET"
-
-          # Check if it's a weekday (Mon-Fri = 1-5)
-          if [ $DOW -ge 6 ]; then
-            echo "🚫 Market is closed (weekend: day $DOW)"
-            echo "Skipping workflow to save API credits"
-            exit 0  # Exit gracefully, not as failure
-          fi
-
-          # Market hours are 09:30-16:00 ET
-          # Convert to minutes for precise check
-          CURRENT_MINUTES=$((10#$HOUR_ET * 60 + 10#$MINUTE_ET))
-          MARKET_OPEN_MINUTES=$((9 * 60 + 30))  # 9:30 AM
-          MARKET_CLOSE_MINUTES=$((16 * 60))     # 4:00 PM
-
-          if [ $CURRENT_MINUTES -lt $MARKET_OPEN_MINUTES ]; then
-            echo "🚫 Market is not open yet (current: ${HOUR_ET}:${MINUTE_ET} ET, opens at 09:30 ET)"
-            echo "Skipping workflow to save API credits"
-            exit 0  # Exit gracefully
-          fi
-
-          if [ $CURRENT_MINUTES -ge $MARKET_CLOSE_MINUTES ]; then
-            echo "🚫 Market is closed (current: ${HOUR_ET}:${MINUTE_ET} ET, closed at 16:00 ET)"
-            echo "Skipping workflow to save API credits"
-            exit 0  # Exit gracefully
-          fi
-
-          echo "✅ Market is open (${HOUR_ET}:${MINUTE_ET} ET) - proceeding with workflow"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Cache key includes Cargo.lock for dependency changes
-          # Automatically handles target/ and ~/.cargo caching
-          shared-key: "release"
-          cache-on-failure: true
-
-      - name: Build TraderJoe
-        env:
-          SQLX_OFFLINE: true
-        run: cargo build --release
-
-      - name: Test Database Connection
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          echo "🔍 Testing database connection..."
-
-          if [ -z "$DATABASE_URL" ]; then
-            echo "❌ ERROR: DATABASE_URL secret is not set!"
-            exit 1
-          fi
-
-          echo "✅ DATABASE_URL secret is set"
-
-          echo "Testing database connection with traderjoe --help..."
-          if ./target/release/traderjoe --help 2>&1; then
-            echo "✅ Database connection successful!"
-          else
-            echo "❌ Database connection failed"
-            exit 1
-          fi
-
-      - name: Fetch Latest Market Data
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
-          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
-        run: |
-          echo "Fetching market data for SPY..."
-          ./target/release/traderjoe fetch --symbol SPY --data-type ohlcv --days 5
-
-      - name: Run Morning Analysis (ACE Pipeline)
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
-          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
-          PAPER_TRADING: true
-        run: |
-          set +e  # Disable exit on error for the entire script
-
-          echo "=== Environment Check ==="
-          echo "LLM_PROVIDER: $LLM_PROVIDER"
-          echo "PRIMARY_MODEL: $PRIMARY_MODEL"
-          echo "FALLBACK_MODEL: $FALLBACK_MODEL"
-          echo "CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:0:10}..."
-          echo "========================="
-
-          echo "Running morning analysis..."
-          ./target/release/traderjoe analyze --symbol SPY 2>&1 | tee /tmp/analysis_output.txt
-          EXIT_CODE=${PIPESTATUS[0]}
-
-          echo ""
-          echo "Exit code: $EXIT_CODE"
-
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Analysis failed with exit code $EXIT_CODE"
-            echo "Full output above and saved to /tmp/analysis_output.txt"
-            exit $EXIT_CODE
-          fi
-
-          echo "✅ Analysis completed successfully"
-
-      - name: Auto-Execute Trade if Confidence Threshold Met
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PAPER_TRADING: true
-        run: |
-          echo "Checking auto-execution criteria..."
-
-          # Confidence threshold (0.50 for learning phase, stored as 50%)
-          CONFIDENCE_THRESHOLD=50
-
-          # Extract recommendation ID (ACE context ID)
-          RECOMMENDATION_ID=$(cat /tmp/analysis_output.txt | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
-
-          if [[ -n "$RECOMMENDATION_ID" ]]; then
-            echo "Found recommendation ID: $RECOMMENDATION_ID"
-
-            # Extract confidence percentage (e.g., "82.0" from "Confidence: 82.0%")
-            # Use grep to find the confidence line, then extract just the number
-            CONFIDENCE=$(cat /tmp/analysis_output.txt | grep -E "^Confidence: [0-9]+\.[0-9]+%" | grep -oE '[0-9]+\.[0-9]+' | head -1)
-
-            if [[ -n "$CONFIDENCE" ]]; then
-              # Remove any decimal point for integer comparison
-              CONFIDENCE_INT=$(echo "$CONFIDENCE" | awk '{printf "%.0f", $1}')
-
-              echo "Confidence: ${CONFIDENCE}% (threshold: ${CONFIDENCE_THRESHOLD}%)"
-
-              # Execute if confidence meets threshold (comparing as integers)
-              if [[ "$CONFIDENCE_INT" -ge "$CONFIDENCE_THRESHOLD" ]]; then
-                echo "✅ Confidence meets threshold - AUTO-EXECUTING TRADE"
-                echo "(Paper trading mode - no real money at risk)"
-                ./target/release/traderjoe execute --recommendation-id "$RECOMMENDATION_ID"
-              else
-                echo "⏭️  Confidence below threshold - SKIPPING execution"
-                echo "   (${CONFIDENCE}% < ${CONFIDENCE_THRESHOLD}%)"
-              fi
-            else
-              echo "❌ Could not parse confidence - SKIPPING execution"
-              echo "Analysis output:"
-              cat /tmp/analysis_output.txt | grep -i confidence
-            fi
-          else
-            echo "❌ No recommendation ID found - SKIPPING execution"
-          fi
-
-      - name: Display Account Status
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        run: |
-          echo "Current positions:"
-          ./target/release/traderjoe positions
-
-      - name: Display ACE Playbook Stats
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          echo "ACE Playbook statistics:"
-          ./target/release/traderjoe playbook-stats
-
-      - name: Persist Analysis to Database
-        if: always()
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          echo "📝 Persisting analysis summary to database..."
-
-          # Extract recommendation details for database storage
-          RECOMMENDATION_ID=$(cat /tmp/analysis_output.txt | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
-          ACTION=$(cat /tmp/analysis_output.txt | grep -E "^Action:" | sed 's/Action: //')
-          CONFIDENCE=$(cat /tmp/analysis_output.txt | grep -E "^Confidence: [0-9]+\.[0-9]+%" | grep -oE '[0-9]+\.[0-9]+' | head -1)
-
-          if [[ -n "$RECOMMENDATION_ID" && -n "$ACTION" && -n "$CONFIDENCE" ]]; then
-            # Convert confidence from percentage to decimal for database
-            CONFIDENCE_DECIMAL=$(echo "scale=4; $CONFIDENCE / 100" | bc)
-
-            # Store in database using psql
-            echo "Storing analysis: Action=$ACTION, Confidence=${CONFIDENCE}%, ID=$RECOMMENDATION_ID"
-
-            # The ACE context is already in the database from the analyze command
-            # We just need to add a comment or summary record
-            echo "✅ Analysis already persisted to ace_contexts table (ID: $RECOMMENDATION_ID)"
-            echo "   Action: $ACTION"
-            echo "   Confidence: ${CONFIDENCE}%"
-          else
-            echo "⚠️  Could not extract all analysis details, skipping database persistence"
-          fi
+# name: Morning Trading Routine
+#
+# on:
+#   schedule:
+#     # Run at 9:45 AM ET on weekdays only (after market open at 9:30 AM ET)
+#     # ET is UTC-5 (EST) or UTC-4 (EDT), using 14:45 UTC to work year-round
+#     - cron: "45 14 * * 1-5"
+#   workflow_dispatch: # Allow manual trigger for testing
+#
+# env:
+#   RUST_BACKTRACE: 1
+#   RUST_LOG: traderjoe=info,sqlx=warn
+#   LLM_PROVIDER: workers_ai
+#   PRIMARY_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+#   FALLBACK_MODEL: "@cf/meta/llama-3.1-8b-instruct"
+#
+# jobs:
+#   morning_analysis:
+#     runs-on: ubuntu-latest
+#     # Only run on weekdays during market hours
+#     if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
+#     permissions:
+#       contents: read
+#
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v4
+#
+#       - name: Check if Market is Open
+#         id: market_check
+#         run: |
+#           # Get current day of week (1=Monday, ..., 7=Sunday)
+#           DOW=$(date -u +%u)
+#
+#           # Get current hour in ET using America/New_York timezone
+#           HOUR_ET=$(TZ=America/New_York date +%H)
+#           MINUTE_ET=$(TZ=America/New_York date +%M)
+#
+#           # Get current date for logging
+#           DATE_ET=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S %Z')
+#           echo "Current time: $DATE_ET"
+#
+#           # Check if it's a weekday (Mon-Fri = 1-5)
+#           if [ $DOW -ge 6 ]; then
+#             echo "🚫 Market is closed (weekend: day $DOW)"
+#             echo "Skipping workflow to save API credits"
+#             exit 0  # Exit gracefully, not as failure
+#           fi
+#
+#           # Market hours are 09:30-16:00 ET
+#           # Convert to minutes for precise check
+#           CURRENT_MINUTES=$((10#$HOUR_ET * 60 + 10#$MINUTE_ET))
+#           MARKET_OPEN_MINUTES=$((9 * 60 + 30))  # 9:30 AM
+#           MARKET_CLOSE_MINUTES=$((16 * 60))     # 4:00 PM
+#
+#           if [ $CURRENT_MINUTES -lt $MARKET_OPEN_MINUTES ]; then
+#             echo "🚫 Market is not open yet (current: ${HOUR_ET}:${MINUTE_ET} ET, opens at 09:30 ET)"
+#             echo "Skipping workflow to save API credits"
+#             exit 0  # Exit gracefully
+#           fi
+#
+#           if [ $CURRENT_MINUTES -ge $MARKET_CLOSE_MINUTES ]; then
+#             echo "🚫 Market is closed (current: ${HOUR_ET}:${MINUTE_ET} ET, closed at 16:00 ET)"
+#             echo "Skipping workflow to save API credits"
+#             exit 0  # Exit gracefully
+#           fi
+#
+#           echo "✅ Market is open (${HOUR_ET}:${MINUTE_ET} ET) - proceeding with workflow"
+#
+#       - name: Install Rust toolchain
+#         uses: dtolnay/rust-toolchain@stable
+#
+#       - name: Cache Rust dependencies
+#         uses: Swatinem/rust-cache@v2
+#         with:
+#           # Cache key includes Cargo.lock for dependency changes
+#           # Automatically handles target/ and ~/.cargo caching
+#           shared-key: "release"
+#           cache-on-failure: true
+#
+#       - name: Build TraderJoe
+#         env:
+#           SQLX_OFFLINE: true
+#         run: cargo build --release
+#
+#       - name: Test Database Connection
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#         run: |
+#           echo "🔍 Testing database connection..."
+#
+#           if [ -z "$DATABASE_URL" ]; then
+#             echo "❌ ERROR: DATABASE_URL secret is not set!"
+#             exit 1
+#           fi
+#
+#           echo "✅ DATABASE_URL secret is set"
+#
+#           echo "Testing database connection with traderjoe --help..."
+#           if ./target/release/traderjoe --help 2>&1; then
+#             echo "✅ Database connection successful!"
+#           else
+#             echo "❌ Database connection failed"
+#             exit 1
+#           fi
+#
+#       - name: Fetch Latest Market Data
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+#           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+#           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+#           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+#         run: |
+#           echo "Fetching market data for SPY..."
+#           ./target/release/traderjoe fetch --symbol SPY --data-type ohlcv --days 5
+#
+#       - name: Run Morning Analysis (ACE Pipeline)
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+#           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+#           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+#           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+#           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+#           PAPER_TRADING: true
+#         run: |
+#           set +e  # Disable exit on error for the entire script
+#
+#           echo "=== Environment Check ==="
+#           echo "LLM_PROVIDER: $LLM_PROVIDER"
+#           echo "PRIMARY_MODEL: $PRIMARY_MODEL"
+#           echo "FALLBACK_MODEL: $FALLBACK_MODEL"
+#           echo "CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:0:10}..."
+#           echo "========================="
+#
+#           echo "Running morning analysis..."
+#           ./target/release/traderjoe analyze --symbol SPY 2>&1 | tee /tmp/analysis_output.txt
+#           EXIT_CODE=${PIPESTATUS[0]}
+#
+#           echo ""
+#           echo "Exit code: $EXIT_CODE"
+#
+#           if [ $EXIT_CODE -ne 0 ]; then
+#             echo "❌ Analysis failed with exit code $EXIT_CODE"
+#             echo "Full output above and saved to /tmp/analysis_output.txt"
+#             exit $EXIT_CODE
+#           fi
+#
+#           echo "✅ Analysis completed successfully"
+#
+#       - name: Auto-Execute Trade if Confidence Threshold Met
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+#           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#           PAPER_TRADING: true
+#         run: |
+#           echo "Checking auto-execution criteria..."
+#
+#           # Confidence threshold (0.50 for learning phase, stored as 50%)
+#           CONFIDENCE_THRESHOLD=50
+#
+#           # Extract recommendation ID (ACE context ID)
+#           RECOMMENDATION_ID=$(cat /tmp/analysis_output.txt | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+#
+#           if [[ -n "$RECOMMENDATION_ID" ]]; then
+#             echo "Found recommendation ID: $RECOMMENDATION_ID"
+#
+#             # Extract confidence percentage (e.g., "82.0" from "Confidence: 82.0%")
+#             # Use grep to find the confidence line, then extract just the number
+#             CONFIDENCE=$(cat /tmp/analysis_output.txt | grep -E "^Confidence: [0-9]+\.[0-9]+%" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+#
+#             if [[ -n "$CONFIDENCE" ]]; then
+#               # Remove any decimal point for integer comparison
+#               CONFIDENCE_INT=$(echo "$CONFIDENCE" | awk '{printf "%.0f", $1}')
+#
+#               echo "Confidence: ${CONFIDENCE}% (threshold: ${CONFIDENCE_THRESHOLD}%)"
+#
+#               # Execute if confidence meets threshold (comparing as integers)
+#               if [[ "$CONFIDENCE_INT" -ge "$CONFIDENCE_THRESHOLD" ]]; then
+#                 echo "✅ Confidence meets threshold - AUTO-EXECUTING TRADE"
+#                 echo "(Paper trading mode - no real money at risk)"
+#                 ./target/release/traderjoe execute --recommendation-id "$RECOMMENDATION_ID"
+#               else
+#                 echo "⏭️  Confidence below threshold - SKIPPING execution"
+#                 echo "   (${CONFIDENCE}% < ${CONFIDENCE_THRESHOLD}%)"
+#               fi
+#             else
+#               echo "❌ Could not parse confidence - SKIPPING execution"
+#               echo "Analysis output:"
+#               cat /tmp/analysis_output.txt | grep -i confidence
+#             fi
+#           else
+#             echo "❌ No recommendation ID found - SKIPPING execution"
+#           fi
+#
+#       - name: Display Account Status
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+#         run: |
+#           echo "Current positions:"
+#           ./target/release/traderjoe positions
+#
+#       - name: Display ACE Playbook Stats
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#         run: |
+#           echo "ACE Playbook statistics:"
+#           ./target/release/traderjoe playbook-stats
+#
+#       - name: Persist Analysis to Database
+#         if: always()
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#         run: |
+#           echo "📝 Persisting analysis summary to database..."
+#
+#           # Extract recommendation details for database storage
+#           RECOMMENDATION_ID=$(cat /tmp/analysis_output.txt | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+#           ACTION=$(cat /tmp/analysis_output.txt | grep -E "^Action:" | sed 's/Action: //')
+#           CONFIDENCE=$(cat /tmp/analysis_output.txt | grep -E "^Confidence: [0-9]+\.[0-9]+%" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+#
+#           if [[ -n "$RECOMMENDATION_ID" && -n "$ACTION" && -n "$CONFIDENCE" ]]; then
+#             # Convert confidence from percentage to decimal for database
+#             CONFIDENCE_DECIMAL=$(echo "scale=4; $CONFIDENCE / 100" | bc)
+#
+#             # Store in database using psql
+#             echo "Storing analysis: Action=$ACTION, Confidence=${CONFIDENCE}%, ID=$RECOMMENDATION_ID"
+#
+#             # The ACE context is already in the database from the analyze command
+#             # We just need to add a comment or summary record
+#             echo "✅ Analysis already persisted to ace_contexts table (ID: $RECOMMENDATION_ID)"
+#             echo "   Action: $ACTION"
+#             echo "   Confidence: ${CONFIDENCE}%"
+#           else
+#             echo "⚠️  Could not extract all analysis details, skipping database persistence"
+#           fi
+#
