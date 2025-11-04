@@ -1,151 +1,155 @@
-name: Evening Review Routine
+# WORKFLOW TEMPORARILY DISABLED TO SAVE CREDITS
+# Uncomment below to re-enable this workflow
 
-on:
-  schedule:
-    # Run at 1:00 PM PST (4:00 PM ET) on weekdays
-    # PST is UTC-8, so 1:00 PM PST = 21:00 UTC (9:00 PM UTC)
-    - cron: '0 21 * * 1-5'
-  workflow_dispatch: # Allow manual trigger for testing
-
-env:
-  RUST_BACKTRACE: 1
-  RUST_LOG: traderjoe=info,sqlx=warn
-  LLM_PROVIDER: workers_ai
-  PRIMARY_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-  FALLBACK_MODEL: "@cf/meta/llama-3.1-8b-instruct"
-
-jobs:
-  evening_review:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Check if Market Day
-        id: market_check
-        run: |
-          # Get current day of week (1=Monday, ..., 7=Sunday)
-          DOW=$(date -u +%u)
-
-          # Get current date for logging
-          DATE_ET=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S %Z')
-          echo "Current time: $DATE_ET"
-
-          # Check if it's a weekday (Mon-Fri = 1-5)
-          if [ $DOW -ge 6 ]; then
-            echo "🚫 Market is closed (weekend: day $DOW)"
-            echo "Skipping workflow to save API credits"
-            exit 0  # Exit gracefully, not as failure
-          fi
-
-          echo "✅ Market day - proceeding with evening review"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Cache key includes Cargo.lock for dependency changes
-          # Automatically handles target/ and ~/.cargo caching
-          shared-key: "release"
-          cache-on-failure: true
-
-      - name: Build TraderJoe
-        env:
-          SQLX_OFFLINE: true
-        run: cargo build --release
-
-      - name: Display Today's Performance
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        run: |
-          echo "📊 Today's trading performance..."
-          ./target/release/traderjoe positions 2>&1 | tee /tmp/positions_eod.txt || echo "⚠️  No open positions"
-
-      - name: Run Evening Review (ACE Reflection)
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-          PAPER_TRADING: true
-        run: |
-          set +e  # Don't exit on error
-
-          echo "🧠 Running evening review (ACE reflection)..."
-          echo "This will update the playbook based on today's outcomes"
-
-          ./target/release/traderjoe review 2>&1 | tee /tmp/review_output.txt
-          EXIT_CODE=${PIPESTATUS[0]}
-
-          echo ""
-          echo "Exit code: $EXIT_CODE"
-
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "✅ Evening review completed successfully"
-          else
-            echo "⚠️  Evening review completed with warnings (exit code: $EXIT_CODE)"
-            echo "This is normal if there were no trades today to review"
-          fi
-
-      - name: Display Performance Metrics
-        if: always()
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          echo ""
-          echo "📈 Performance metrics (last 30 days)..."
-          ./target/release/traderjoe performance --days 30 2>&1 | tee /tmp/performance_output.txt || echo "⚠️  Insufficient data for performance metrics"
-
-      - name: Check Playbook Evolution
-        if: always()
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          echo ""
-          echo "📚 Checking playbook evolution..."
-          ./target/release/traderjoe playbook-stats 2>&1 | tee /tmp/playbook_output.txt || echo "⚠️  No playbook entries yet"
-
-      - name: Persist Evening Summary to Database
-        if: always()
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          echo ""
-          echo "📝 Evening review results persisted to database..."
-          echo "   Outcomes stored in ace_contexts table"
-          echo "   Playbook updates stored in playbook_bullets table"
-          echo "   Performance metrics stored in account_balance table"
-
-          # The review command already persists to database
-          echo "✅ All results available in Neon database"
-
-      - name: Summary
-        if: always()
-        run: |
-          echo ""
-          echo "═══════════════════════════════════════════════"
-          echo "🌙 Daily Review Complete!"
-          echo "═══════════════════════════════════════════════"
-          echo ""
-          echo "📊 Key Metrics to Monitor:"
-          echo "  • 🎯 Win Rate should stay > 55%"
-          echo "  • 📈 Sharpe Ratio should be > 1.5"
-          echo "  • 📉 Max Drawdown should be < 15%"
-          echo "  • 🧠 ACE confidence should correlate with outcomes"
-          echo ""
-          echo "🔄 ACE Learning Cycle:"
-          echo "  • Context ingested from today's trades"
-          echo "  • Playbook updated with new patterns"
-          echo "  • Failed predictions analyzed and adjusted"
-          echo ""
-          echo "Results stored in Neon database for analysis"
-          echo "═══════════════════════════════════════════════"
-          echo "See you tomorrow! 🚀"
+# name: Evening Review Routine
+#
+# on:
+#   schedule:
+#     # Run at 1:00 PM PST (4:00 PM ET) on weekdays
+#     # PST is UTC-8, so 1:00 PM PST = 21:00 UTC (9:00 PM UTC)
+#     - cron: '0 21 * * 1-5'
+#   workflow_dispatch: # Allow manual trigger for testing
+#
+# env:
+#   RUST_BACKTRACE: 1
+#   RUST_LOG: traderjoe=info,sqlx=warn
+#   LLM_PROVIDER: workers_ai
+#   PRIMARY_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+#   FALLBACK_MODEL: "@cf/meta/llama-3.1-8b-instruct"
+#
+# jobs:
+#   evening_review:
+#     runs-on: ubuntu-latest
+#     if: github.event_name == 'workflow_dispatch' || (github.event.schedule && github.event_name == 'schedule')
+#     permissions:
+#       contents: read
+#
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v4
+#
+#       - name: Check if Market Day
+#         id: market_check
+#         run: |
+#           # Get current day of week (1=Monday, ..., 7=Sunday)
+#           DOW=$(date -u +%u)
+#
+#           # Get current date for logging
+#           DATE_ET=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S %Z')
+#           echo "Current time: $DATE_ET"
+#
+#           # Check if it's a weekday (Mon-Fri = 1-5)
+#           if [ $DOW -ge 6 ]; then
+#             echo "🚫 Market is closed (weekend: day $DOW)"
+#             echo "Skipping workflow to save API credits"
+#             exit 0  # Exit gracefully, not as failure
+#           fi
+#
+#           echo "✅ Market day - proceeding with evening review"
+#
+#       - name: Install Rust toolchain
+#         uses: dtolnay/rust-toolchain@stable
+#
+#       - name: Cache Rust dependencies
+#         uses: Swatinem/rust-cache@v2
+#         with:
+#           # Cache key includes Cargo.lock for dependency changes
+#           # Automatically handles target/ and ~/.cargo caching
+#           shared-key: "release"
+#           cache-on-failure: true
+#
+#       - name: Build TraderJoe
+#         env:
+#           SQLX_OFFLINE: true
+#         run: cargo build --release
+#
+#       - name: Display Today's Performance
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+#         run: |
+#           echo "📊 Today's trading performance..."
+#           ./target/release/traderjoe positions 2>&1 | tee /tmp/positions_eod.txt || echo "⚠️  No open positions"
+#
+#       - name: Run Evening Review (ACE Reflection)
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+#           PAPER_TRADING: true
+#         run: |
+#           set +e  # Don't exit on error
+#
+#           echo "🧠 Running evening review (ACE reflection)..."
+#           echo "This will update the playbook based on today's outcomes"
+#
+#           ./target/release/traderjoe review 2>&1 | tee /tmp/review_output.txt
+#           EXIT_CODE=${PIPESTATUS[0]}
+#
+#           echo ""
+#           echo "Exit code: $EXIT_CODE"
+#
+#           if [ $EXIT_CODE -eq 0 ]; then
+#             echo "✅ Evening review completed successfully"
+#           else
+#             echo "⚠️  Evening review completed with warnings (exit code: $EXIT_CODE)"
+#             echo "This is normal if there were no trades today to review"
+#           fi
+#
+#       - name: Display Performance Metrics
+#         if: always()
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#         run: |
+#           echo ""
+#           echo "📈 Performance metrics (last 30 days)..."
+#           ./target/release/traderjoe performance --days 30 2>&1 | tee /tmp/performance_output.txt || echo "⚠️  Insufficient data for performance metrics"
+#
+#       - name: Check Playbook Evolution
+#         if: always()
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#         run: |
+#           echo ""
+#           echo "📚 Checking playbook evolution..."
+#           ./target/release/traderjoe playbook-stats 2>&1 | tee /tmp/playbook_output.txt || echo "⚠️  No playbook entries yet"
+#
+#       - name: Persist Evening Summary to Database
+#         if: always()
+#         env:
+#           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#         run: |
+#           echo ""
+#           echo "📝 Evening review results persisted to database..."
+#           echo "   Outcomes stored in ace_contexts table"
+#           echo "   Playbook updates stored in playbook_bullets table"
+#           echo "   Performance metrics stored in account_balance table"
+#
+#           # The review command already persists to database
+#           echo "✅ All results available in Neon database"
+#
+#       - name: Summary
+#         if: always()
+#         run: |
+#           echo ""
+#           echo "═══════════════════════════════════════════════"
+#           echo "🌙 Daily Review Complete!"
+#           echo "═══════════════════════════════════════════════"
+#           echo ""
+#           echo "📊 Key Metrics to Monitor:"
+#           echo "  • 🎯 Win Rate should stay > 55%"
+#           echo "  • 📈 Sharpe Ratio should be > 1.5"
+#           echo "  • 📉 Max Drawdown should be < 15%"
+#           echo "  • 🧠 ACE confidence should correlate with outcomes"
+#           echo ""
+#           echo "🔄 ACE Learning Cycle:"
+#           echo "  • Context ingested from today's trades"
+#           echo "  • Playbook updated with new patterns"
+#           echo "  • Failed predictions analyzed and adjusted"
+#           echo ""
+#           echo "Results stored in Neon database for analysis"
+#           echo "═══════════════════════════════════════════════"
+#           echo "See you tomorrow! 🚀"
+#
